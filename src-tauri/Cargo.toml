@@ -1,0 +1,20 @@
+[package]
+name = "senal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Señal — panel de tu red (shell Tauri)"
+
+[lib]
+name = "senal_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+wifi-core = { path = "../crates/wifi-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
