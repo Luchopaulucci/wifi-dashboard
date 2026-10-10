@@ -2,7 +2,7 @@
 
 :root {
   color-scheme: dark;
-  font-family: "Iowan Old Style", "Palatino Linotype", ui-serif, Georgia, serif;
+  font-family: "Segoe UI", "Helvetica Neue", ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
@@ -17,7 +17,7 @@ body {
 }
 
 .font-ui {
-  font-family: "Segoe UI", "Helvetica Neue", ui-sans-serif, system-ui, sans-serif;
+  font-family: inherit;
 }
 
 .card {
