@@ -103,11 +103,11 @@ fn wait_with_timeout(
     let mut stdout_pipe = child
         .stdout
         .take()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "stdout no disponible"))?;
+        .ok_or_else(|| std::io::Error::other("stdout no disponible"))?;
     let mut stderr_pipe = child
         .stderr
         .take()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "stderr no disponible"))?;
+        .ok_or_else(|| std::io::Error::other("stderr no disponible"))?;
 
     let stdout_handle = thread::spawn(move || {
         let mut buf = Vec::new();
@@ -138,10 +138,10 @@ fn wait_with_timeout(
 
     let stdout = stdout_handle
         .join()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "falló el hilo de stdout"))??;
+        .map_err(|_| std::io::Error::other("falló el hilo de stdout"))??;
     let stderr = stderr_handle
         .join()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "falló el hilo de stderr"))??;
+        .map_err(|_| std::io::Error::other("falló el hilo de stderr"))??;
 
     Ok(std::process::Output {
         status,
