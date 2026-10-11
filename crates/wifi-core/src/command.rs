@@ -91,6 +91,7 @@ fn wait_with_timeout(
     cmd: &mut Command,
     timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
     use std::thread;
     use std::time::Instant;
 
@@ -98,21 +99,55 @@ fn wait_with_timeout(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "stdout no disponible"))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "stderr no disponible"))?;
+
+    let stdout_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout_pipe.read_to_end(&mut buf).map(|_n| buf)
+    });
+    let stderr_handle = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stderr_pipe.read_to_end(&mut buf).map(|_n| buf)
+    });
+
     let start = Instant::now();
-    loop {
-        if let Some(_status) = child.try_wait()? {
-            return child.wait_with_output();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_handle.join();
+            let _ = stderr_handle.join();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "tiempo de espera agotado",
             ));
         }
         thread::sleep(Duration::from_millis(20));
-    }
+    };
+
+    let stdout = stdout_handle
+        .join()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "falló el hilo de stdout"))??;
+    let stderr = stderr_handle
+        .join()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "falló el hilo de stderr"))??;
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(test)]
@@ -156,5 +191,44 @@ mod tests {
             resolve_bin("sh"),
             Err(CoreError::CommandNotAllowed(_))
         ));
+    }
+
+    #[test]
+    fn large_stdout_finishes_quickly() {
+        use std::time::Instant;
+
+        let mut cmd = Command::new("/usr/bin/head");
+        cmd.args(["-c", "262144", "/dev/zero"]);
+        let start = Instant::now();
+        let output = wait_with_timeout(&mut cmd, Duration::from_secs(3))
+            .expect("la salida grande no debería trabar el pipe");
+        assert!(output.status.success());
+        assert!(
+            output.stdout.len() > 200_000,
+            "stdout={} bytes",
+            output.stdout.len()
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "tardó {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn timeout_kills_long_process() {
+        use std::time::Instant;
+
+        let mut cmd = Command::new("/usr/bin/sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let err = wait_with_timeout(&mut cmd, Duration::from_millis(250))
+            .expect_err("sleep 30 debería cortarse por timeout");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "el kill no fue a tiempo: {:?}",
+            start.elapsed()
+        );
     }
 }
