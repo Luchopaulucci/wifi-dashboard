@@ -11,23 +11,38 @@ Proyecto personal de Luciano. La UI y esta guía están en castellano (Argentina
 3. **Monitoreo** — ping a la puerta de enlace, `1.1.1.1` y `8.8.8.8`. Historial en SQLite local (última hora / día / semana) con retención de ~8 días.
 4. **Equipos en tu red** — vecinos de `ip neigh` y, si lo pedís, un barrido liviano de ping **solo** de la /24 a la que estás conectado. Nombres por mDNS (`avahi-resolve-address`) o DNS inverso. Fabricante vía archivo OUI empaquetado.
 
-## Requisitos (Ubuntu)
+## Requisitos (Ubuntu / Debian)
+
+Hace falta **Rust** (stable, vía rustup), **Node.js 22** y las libs de Tauri 2.
+
+Rust (no uses el paquete `rustc` de apt: suele estar viejo o incompleto):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+Cerrá y reabrí la terminal, o ejecutá `source ~/.cargo/env` en cada sesión nueva, hasta que `rustc --version` y `cargo --version` respondan.
+
+Libs de Tauri 2:
 
 ```bash
 sudo apt update
-sudo apt install -y \
-  libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
-  network-manager iw iproute2 iputils-ping
+sudo apt install -y build-essential curl wget file libssl-dev libgtk-3-dev \
+  libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-Opcional para resolver nombres .local:
+Para que los módulos de red funcionen de verdad (no solo el modo simulado):
+
+```bash
+sudo apt install -y network-manager iw iproute2 iputils-ping
+```
+
+Opcional para resolver nombres `.local`:
 
 ```bash
 sudo apt install -y avahi-utils
 ```
-
-También hace falta **Rust** (stable) y **Node.js 22**.
 
 En otras distros la app degrada: si no está `nmcli` usa `iw` / `ip`; si no hay interfaz WiFi entra en **modo simulado** (marcado en la UI).
 
@@ -39,7 +54,13 @@ npm install
 npm run tauri dev
 ```
 
-La UI web (sin ventana nativa) también corre con `npm run dev` y queda en `http://127.0.0.1:1420`. Sin Tauri se usan datos de ejemplo, claramente etiquetados como **Modo simulado**.
+Ese es el comando correcto: **`npm run tauri dev`** levanta el backend de Rust y la ventana nativa. **`npm run dev` no alcanza**: solo arranca Vite (la UI en `http://127.0.0.1:1420`) **sin el backend**. Ahí no hay `nmcli`/`iw`/SQLite; ves datos de ejemplo etiquetados como **Modo simulado**.
+
+La **primera compilación tarda** (baja y compila Tauri, WebKit bindings y el crate). Las siguientes son más rápidas.
+
+### Troubleshooting
+
+Si ves `failed to run 'cargo metadata' ... No such file or directory` (o `cargo: command not found`), **falta Rust**. Instalá rustup como arriba, corré `source ~/.cargo/env` y volvé a intentar `npm run tauri dev`.
 
 Forzar mock aunque haya WiFi:
 
