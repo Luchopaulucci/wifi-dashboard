@@ -52,7 +52,7 @@ function NavButtons({
           ? `rounded-full px-3 py-1.5 font-ui text-sm ${
               tab === item.id ? "bg-white text-slate-950" : "bg-white/5"
             }`
-          : `w-full rounded-2xl px-3 py-3 text-left ${
+          : `w-full rounded-xl px-3 py-1.5 text-left ${
               tab === item.id ? "bg-white text-slate-950" : "text-slate-300 hover:bg-white/5"
             }`
       }
@@ -61,8 +61,8 @@ function NavButtons({
         item.label
       ) : (
         <>
-          <span className="block text-base">{item.label}</span>
-          <span className="mt-0.5 block font-ui text-xs opacity-70">{item.hint}</span>
+          <span className="block text-sm">{item.label}</span>
+          <span className="block font-ui text-[11px] opacity-70">{item.hint}</span>
         </>
       )}
     </button>
@@ -78,7 +78,7 @@ function NavButtons({
         WiFi y LAN
       </p>
       <div className="space-y-2">{WIFI_TABS.map(btn)}</div>
-      <p className="mt-6 px-1 pb-1 font-ui text-[11px] uppercase tracking-[0.18em] text-slate-500">
+      <p className="mt-4 px-1 pb-1 font-ui text-[11px] uppercase tracking-[0.18em] text-slate-500">
         Conexiones y firewall
       </p>
       <div className="space-y-2">{NET_TABS.map(btn)}</div>
@@ -144,7 +144,7 @@ export default function App() {
   return (
     <div className="grid-bg flex min-h-screen">
       <aside className="sticky top-0 hidden h-screen w-72 shrink-0 flex-col overflow-hidden border-r border-white/10 bg-slate-950/70 px-5 py-6 md:flex">
-        <div className="mb-8 flex items-center gap-3">
+        <div className="mb-5 flex items-center gap-3">
           <img src="/senal.svg" alt="" className="h-11 w-11" />
           <div>
             <p className="text-2xl font-semibold leading-none">Señal</p>
@@ -156,16 +156,15 @@ export default function App() {
         <nav className="min-h-0 flex-1 overflow-y-auto pr-1">
           <NavButtons tab={tab} setTab={setTab} />
         </nav>
-        <p className="mt-4 font-ui text-xs leading-5 text-slate-500">
-          Sin servidor de red. IPC solo en 127.0.0.1. No corre como root. Las pestañas nuevas son
-          solo lectura.
+        <p className="mt-3 shrink-0 font-ui text-[10px] leading-4 text-slate-500">
+          IPC local · no root · pestañas nuevas solo lectura
         </p>
       </aside>
       <main className="min-w-0 flex-1 px-5 py-6 md:px-10">
         <div className="mb-4 flex flex-wrap gap-2 md:hidden">
           <NavButtons tab={tab} setTab={setTab} compact />
         </div>
-        {view?.mock ? <MockBanner reason={view.mock_reason} /> : null}
+        {view?.mock && !netTab ? <MockBanner reason={view.mock_reason} /> : null}
         {view && !netTab ? (
           <p className="mb-6 font-ui text-xs text-slate-500">
             Actualizado {relativeAgo(view.collected_at_ms, now)}

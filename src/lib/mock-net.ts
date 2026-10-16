@@ -426,7 +426,7 @@ export function mockTraceEvents(destination: string): TraceEvent[] {
       kind: "hop",
       hop: {
         hop: 5,
-        address: destination.includes(":") ? destination : "8.8.8.8",
+        address: destination.trim() || "8.8.8.8",
         hostname: null,
         rtt_ms: 18.3,
         lost: false,
