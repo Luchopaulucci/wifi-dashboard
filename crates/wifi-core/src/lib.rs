@@ -9,12 +9,13 @@ mod congestion;
 mod engine;
 mod error;
 mod mock;
+pub mod net;
 mod oui;
 mod parse;
 mod store;
 pub mod types;
 
-pub use command::{bin_exists, run_cmd, validate_iface, validate_ipv4};
+pub use command::{bin_exists, run_cmd, validate_host, validate_iface, validate_ipv4};
 pub use congestion::{congestion_bars, overlaps_24};
 pub use engine::{AppCore, INTERNET_TARGETS};
 pub use error::{CoreError, Result};

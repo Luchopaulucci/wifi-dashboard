@@ -14,9 +14,9 @@
       {
         "title": "Señal — tu red en vivo",
         "width": 1280,
-        "height": 840,
+        "height": 880,
         "minWidth": 960,
-        "minHeight": 640
+        "minHeight": 700
       }
     ],
     "security": {

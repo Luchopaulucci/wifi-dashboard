@@ -1,0 +1,9 @@
+Netid State      Recv-Q Send-Q Local Address:Port     Peer Address:Port       Process
+tcp   ESTAB      0      0      192.168.0.24:45678     1.1.1.1:443             users:(("firefox",pid=4321,fd=89))
+tcp   ESTAB      0      0      192.168.0.24:45679     142.250.184.14:443      users:(("firefox",pid=4321,fd=90))
+tcp   TIME-WAIT  0      0      192.168.0.24:40112     185.199.108.153:443     users:(("code",pid=2201,fd=32))
+tcp   ESTAB      0      0      127.0.0.1:5432         127.0.0.1:40100         users:(("postgres",pid=900,fd=8))
+udp   UNCONN     0      0      192.168.0.24:68        192.168.0.1:67          users:(("NetworkManager",pid=890,fd=12))
+udp   ESTAB      0      0      192.168.0.24:53122     1.1.1.1:53              users:(("systemd-resolve",pid=612,fd=15))
+tcp   ESTAB      0      0      [2800:a4:1::24]:51234  [2606:4700:4700::1111]:443 users:(("firefox",pid=4321,fd=91))
+tcp   CLOSE-WAIT 0      0      192.168.0.24:41000     8.8.8.8:443             users:(("curl",pid=9999,fd=3))
