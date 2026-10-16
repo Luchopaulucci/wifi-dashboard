@@ -1,0 +1,9 @@
+Interface wlp2s0
+	ifindex 3
+	wdev 0x1
+	addr 3c:22:fb:10:20:30
+	ssid Fibertel-5G
+	type managed
+	wiphy 0
+	channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz
+	txpower 22.00 dBm

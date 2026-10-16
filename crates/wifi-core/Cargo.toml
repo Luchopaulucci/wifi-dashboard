@@ -1,0 +1,16 @@
+[package]
+name = "wifi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Recolección y almacenamiento de datos de red (WiFi, LAN, monitoreo)"
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+dns-lookup = "2"
+
+[dev-dependencies]
+tempfile = "3"

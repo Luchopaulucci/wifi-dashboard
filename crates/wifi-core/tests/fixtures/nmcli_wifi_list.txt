@@ -1,0 +1,4 @@
+*:AA\:BB\:CC\:11\:22\:33:Fibertel-5G:36:5180 MHz:866 Mbit/s:96:WPA2
+ :AA\:BB\:CC\:11\:22\:34:Fibertel-2.4:6:2437 MHz:144 Mbit/s:78:WPA2
+ :11\:22\:33\:44\:55\:66:Vecino-Claro:1:2412 MHz:72 Mbit/s:56:WPA2
+ :00\:11\:22\:33\:44\:55::11:2462 MHz:54 Mbit/s:20:WPA1 WPA2
