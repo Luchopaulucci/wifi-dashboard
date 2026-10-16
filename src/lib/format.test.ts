@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { bandLabel, formatMbps, formatMs, hiddenSsid, relativeAgo, signalTone } from "./format";
+import {
+  bandLabel,
+  formatBytes,
+  formatMbps,
+  formatMs,
+  formatTimeout,
+  hiddenSsid,
+  relativeAgo,
+  signalTone,
+} from "./format";
 
 describe("format", () => {
   it("nombra bandas", () => {
@@ -26,6 +35,13 @@ describe("format", () => {
     expect(signalTone(90)).toContain("teal");
     expect(signalTone(50)).toContain("amber");
     expect(signalTone(10)).toContain("rose");
+  });
+
+  it("bytes y timeouts", () => {
+    expect(formatBytes(840)).toBe("840 B");
+    expect(formatBytes(456000)).toBe("456.0 kB");
+    expect(formatTimeout(59)).toBe("59 s");
+    expect(formatTimeout(120)).toBe("2 min");
   });
 
   it("relativo", () => {

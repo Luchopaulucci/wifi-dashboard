@@ -5,8 +5,49 @@ use std::time::Duration;
 
 use crate::error::{CoreError, Result};
 
-const ALLOWED_BINS: &[&str] = &["nmcli", "iw", "ip", "ping", "avahi-resolve-address"];
+const ALLOWED_BINS: &[&str] = &[
+    "nmcli",
+    "iw",
+    "ip",
+    "ping",
+    "avahi-resolve-address",
+    "ss",
+    "conntrack",
+    "nft",
+    "iptables",
+    "iptables-save",
+    "traceroute",
+    "traceroute6",
+    "tracepath",
+    "tracepath6",
+    "resolvectl",
+    "journalctl",
+];
 const BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+#[derive(Debug, Clone)]
+pub struct CmdOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+    pub code: Option<i32>,
+}
+
+impl CmdOutput {
+    pub fn combined(&self) -> String {
+        let mut s = String::new();
+        if !self.stderr.is_empty() {
+            s.push_str(&self.stderr);
+        }
+        if !self.stdout.is_empty() {
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&self.stdout);
+        }
+        s
+    }
+}
 
 pub fn validate_iface(name: &str) -> Result<&str> {
     let ok = (1..=16).contains(&name.len())
@@ -29,6 +70,55 @@ pub fn validate_ipv4(ip: &str) -> Result<&str> {
         Ok(ip)
     } else {
         Err(CoreError::InvalidArg(format!("ipv4: {ip}")))
+    }
+}
+
+/// Destino para traceroute/tracepath: IPv4, IPv6 o hostname ASCII.
+/// Nunca se pasa a un shell; igual rechazamos metacaracteres y flags (`-n`).
+pub fn validate_host(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let host_port = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if host_port.is_empty() || host_port.len() > 253 {
+        return Err(CoreError::InvalidArg(format!("destino: {raw}")));
+    }
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("").to_string()
+    } else if host_port.matches(':').count() == 1
+        && host_port
+            .split(':')
+            .next()
+            .is_some_and(|h| h.parse::<std::net::Ipv4Addr>().is_ok())
+    {
+        host_port.split(':').next().unwrap_or("").to_string()
+    } else {
+        host_port.to_string()
+    };
+    let host = host.trim();
+    if host.is_empty() || host.starts_with('-') {
+        return Err(CoreError::InvalidArg(format!("destino: {raw}")));
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(host.to_string());
+    }
+    let ok = host.split('.').all(|label| {
+        let b = label.as_bytes();
+        (1..=63).contains(&b.len())
+            && b[0].is_ascii_alphanumeric()
+            && b[b.len() - 1].is_ascii_alphanumeric()
+            && b.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'-')
+    }) && host.is_ascii();
+    if ok {
+        Ok(host.trim_end_matches('.').to_string())
+    } else {
+        Err(CoreError::InvalidArg(format!("destino: {raw}")))
     }
 }
 
@@ -85,6 +175,47 @@ pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<S
         });
     }
     String::from_utf8(output.stdout).map_err(|e| CoreError::Parse(e.to_string()))
+}
+
+/// Como `run_cmd`, pero no falla por código de salida ≠ 0 (sirve para
+/// detectar "permission denied" vs reglas vacías vs traceroute con hops *).
+pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+    let bin = resolve_bin(name)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args.iter().map(OsStr::new));
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+
+    let output = wait_with_timeout(&mut cmd, timeout).map_err(|e| CoreError::CommandFailed {
+        comando: name.to_string(),
+        detalle: e.to_string(),
+    })?;
+
+    Ok(CmdOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: output.status.success(),
+        code: output.status.code(),
+    })
+}
+
+/// Lanza un binario permitido con stdout/stderr en pipe. El caller drena.
+pub fn spawn_allowed(name: &str, args: &[&str]) -> Result<std::process::Child> {
+    let bin = resolve_bin(name)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args.iter().map(OsStr::new));
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.spawn().map_err(|e| CoreError::CommandFailed {
+        comando: name.to_string(),
+        detalle: e.to_string(),
+    })
 }
 
 fn wait_with_timeout(
@@ -179,6 +310,46 @@ mod tests {
         assert!(validate_ipv4("1.1.1.1 && reboot").is_err());
         assert!(validate_ipv4("256.0.0.1").is_err());
         assert!(validate_ipv4("").is_err());
+    }
+
+    #[test]
+    fn host_ok_and_rejects_injection() {
+        assert_eq!(validate_host("8.8.8.8").unwrap(), "8.8.8.8");
+        assert_eq!(
+            validate_host("https://one.one.one.one/path").unwrap(),
+            "one.one.one.one"
+        );
+        assert_eq!(
+            validate_host("2001:4860:4860::8888").unwrap(),
+            "2001:4860:4860::8888"
+        );
+        assert_eq!(
+            validate_host("[2001:4860:4860::8888]").unwrap(),
+            "2001:4860:4860::8888"
+        );
+        assert!(validate_host("fibertel.com.ar").is_ok());
+        assert!(validate_host("-n").is_err());
+        assert!(validate_host("8.8.8.8; id").is_err());
+        assert!(validate_host("example.com && reboot").is_err());
+        assert!(validate_host("foo$(id).com").is_err());
+        assert!(validate_host("").is_err());
+        assert!(validate_host("a b.com").is_err());
+    }
+
+    #[test]
+    fn new_bins_are_allowed_not_shell() {
+        assert!(matches!(
+            resolve_bin("ss"),
+            Ok(_) | Err(CoreError::BinaryMissing(_))
+        ));
+        assert!(matches!(
+            resolve_bin("nft"),
+            Ok(_) | Err(CoreError::BinaryMissing(_))
+        ));
+        assert!(matches!(
+            resolve_bin("bash"),
+            Err(CoreError::CommandNotAllowed(_))
+        ));
     }
 
     #[test]

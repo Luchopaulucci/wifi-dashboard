@@ -1,0 +1,5 @@
+Handling query www.google.com IN A
+Handling query metrics.ubuntu.com IN AAAA
+DNS query to 1.1.1.1 for daisy.ubuntu.com
+lookup api.snapcraft.io
+Handling query www.google.com IN A

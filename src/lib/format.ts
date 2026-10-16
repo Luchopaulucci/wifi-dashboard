@@ -45,6 +45,27 @@ export function signalTone(pct: number | null | undefined): string {
   return "text-rose-300";
 }
 
+export function formatBytes(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  if (value < 1000) return `${value} B`;
+  if (value < 1_000_000) return `${(value / 1000).toFixed(1)} kB`;
+  if (value < 1_000_000_000) return `${(value / 1_000_000).toFixed(1)} MB`;
+  return `${(value / 1_000_000_000).toFixed(2)} GB`;
+}
+
+export function formatCount(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return value.toLocaleString("es-AR");
+}
+
+export function formatTimeout(secs: number | null | undefined): string {
+  if (secs == null) return "—";
+  if (secs < 60) return `${secs} s`;
+  if (secs < 3600) return `${Math.round(secs / 60)} min`;
+  if (secs < 86400) return `${(secs / 3600).toFixed(1)} h`;
+  return `${(secs / 86400).toFixed(1)} d`;
+}
+
 export function relativeAgo(fromMs: number, nowMs: number): string {
   const sec = Math.max(0, Math.round((nowMs - fromMs) / 1000));
   if (sec < 5) return "ahora";

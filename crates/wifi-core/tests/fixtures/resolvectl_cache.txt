@@ -1,0 +1,4 @@
+www.google.com IN A 142.250.184.14
+1.1.1.1
+metrics.ubuntu.com IN A 185.125.190.29
+api.snapcraft.io IN A 185.125.188.54
