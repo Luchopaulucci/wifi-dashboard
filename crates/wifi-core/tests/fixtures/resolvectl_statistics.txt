@@ -1,0 +1,11 @@
+DNSSEC supported by current servers: yes
+
+Transactions                                      Current       Total
+Queries/transactions ............................:          2        847
+Timeouts ........................................:          0          3
+Failure Response ................................:          0          1
+
+Cache
+Current Cache Size ..............................:         42
+Cache hits ......................................:        500
+Cache misses ....................................:        347

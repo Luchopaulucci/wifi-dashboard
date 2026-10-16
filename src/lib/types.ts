@@ -77,4 +77,209 @@ export interface Snapshot {
 }
 
 export type HistoryRange = "hour" | "day" | "week";
-export type TabId = "live" | "nearby" | "monitor" | "devices";
+export type TabId =
+  | "live"
+  | "nearby"
+  | "monitor"
+  | "devices"
+  | "connections"
+  | "nat"
+  | "firewall"
+  | "route"
+  | "boot"
+  | "ports";
+
+export interface PrivilegeHint {
+  binary: string;
+  capability: string;
+  why: string;
+  commands: string[];
+  polkit_note: string;
+}
+
+export interface ConnectionRow {
+  protocol: string;
+  local_ip: string;
+  local_port: string;
+  remote_ip: string;
+  remote_port: string;
+  state: string;
+  process: string | null;
+  pid: number | null;
+  domain: string | null;
+  domain_source: string | null;
+}
+
+export interface ConnectionsReport {
+  collected_at_ms: number;
+  rows: ConnectionRow[];
+  sources: string[];
+  missing: string[];
+  privilege: PrivilegeHint | null;
+  notes: string[];
+}
+
+export interface NatTranslation {
+  protocol: string;
+  internal_ip: string;
+  internal_port: string;
+  translated_ip: string;
+  translated_port: string;
+  dest_ip: string;
+  dest_port: string;
+  state: string | null;
+  timeout_secs: number | null;
+  nat_kind: string;
+  assured: boolean;
+}
+
+export interface NatReport {
+  collected_at_ms: number;
+  translations: NatTranslation[];
+  active_count: number;
+  snat_count: number;
+  dnat_count: number;
+  source: string | null;
+  missing: string[];
+  privilege: PrivilegeHint | null;
+  notes: string[];
+}
+
+export interface FirewallRule {
+  table: string;
+  family: string | null;
+  chain: string;
+  handle: string | null;
+  text: string;
+  criollo: string;
+  packets: number | null;
+  bytes: number | null;
+  verdict: string | null;
+}
+
+export interface FirewallChain {
+  name: string;
+  hook: string | null;
+  policy: string | null;
+  policy_packets: number | null;
+  policy_bytes: number | null;
+  rules: FirewallRule[];
+}
+
+export interface FirewallTable {
+  name: string;
+  family: string | null;
+  chains: FirewallChain[];
+}
+
+export interface FirewallReport {
+  collected_at_ms: number;
+  backend: string | null;
+  tables: FirewallTable[];
+  accepted_packets: number;
+  accepted_bytes: number;
+  dropped_packets: number;
+  dropped_bytes: number;
+  missing: string[];
+  privilege: PrivilegeHint | null;
+  notes: string[];
+}
+
+export type TraceHopKind =
+  | "home_router"
+  | "private"
+  | "isp_start"
+  | "transit"
+  | "destination"
+  | "lost"
+  | "localhost";
+
+export interface TraceHop {
+  hop: number;
+  address: string | null;
+  hostname: string | null;
+  rtt_ms: number | null;
+  lost: boolean;
+  kind: TraceHopKind;
+}
+
+export interface TraceEvent {
+  session_id: string;
+  kind: string;
+  hop: TraceHop | null;
+  message: string | null;
+  tool: string | null;
+  privilege: PrivilegeHint | null;
+}
+
+export interface TrafficCounter {
+  id: string;
+  label: string;
+  value: number;
+  meaning: string;
+  source: string;
+}
+
+export interface TalkerTag {
+  label: string;
+  kind: string;
+}
+
+export interface DnsDomainRow {
+  domain: string;
+  count: number;
+  source: string;
+  talker: TalkerTag | null;
+}
+
+export interface DnsProgramRow {
+  process: string;
+  pid: number | null;
+  dns_server: string | null;
+  proto: string;
+  note: string;
+}
+
+export interface BootTrafficReport {
+  collected_at_ms: number;
+  counters: TrafficCounter[];
+  domains: DnsDomainRow[];
+  programs: DnsProgramRow[];
+  missing: string[];
+  privilege: PrivilegeHint | null;
+  limitations: string[];
+}
+
+export type Reachability = "local_only" | "network_all" | "lan_address";
+
+export interface ListenerRow {
+  protocol: string;
+  local_ip: string;
+  local_port: string;
+  process: string | null;
+  pid: number | null;
+  reach: Reachability;
+  reach_label: string;
+  is_new: boolean;
+}
+
+export interface ListenersReport {
+  collected_at_ms: number;
+  rows: ListenerRow[];
+  new_count: number;
+  source: string | null;
+  missing: string[];
+  notes: string[];
+}
+
+export interface GeoInfo {
+  ip: string;
+  country: string | null;
+  country_code: string | null;
+  isp: string | null;
+  org: string | null;
+  asn: string | null;
+  as_name: string | null;
+  source: string;
+  source_label: string;
+}

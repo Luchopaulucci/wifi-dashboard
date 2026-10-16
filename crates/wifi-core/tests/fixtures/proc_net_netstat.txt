@@ -1,0 +1,4 @@
+TcpExt: SyncookiesSent SyncookiesRecv ListenOverflows TCPSynRetrans
+TcpExt: 0 0 0 3
+IpExt: InNoRoutes InTruncatedPkts InMcastPkts OutMcastPkts InBcastPkts OutBcastPkts InOctets OutOctets
+IpExt: 0 0 10 4 2 1 900000 500000

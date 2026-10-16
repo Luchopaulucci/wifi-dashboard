@@ -1,0 +1,5 @@
+tcp      6 431999 ESTABLISHED src=192.168.0.24 dst=1.1.1.1 sport=45678 dport=443 src=1.1.1.1 dst=192.168.0.24 sport=443 dport=45678 [ASSURED] mark=0 use=1
+tcp      6 120 ESTABLISHED src=10.0.0.5 dst=8.8.8.8 sport=12345 dport=443 src=8.8.8.8 dst=181.15.20.30 sport=443 dport=12345 [ASSURED] [SNAT] mark=0 use=1
+tcp      6 89 ESTABLISHED src=192.168.0.24 dst=203.0.113.10 sport=40000 dport=80 src=198.51.100.8 dst=192.168.0.24 sport=80 dport=40000 [DNAT] mark=0 use=1
+udp      17 29 src=192.168.0.24 dst=1.1.1.1 sport=53122 dport=53 src=1.1.1.1 dst=192.168.0.24 sport=53 dport=53122 mark=0 use=1
+ipv4     2 tcp      6 55 SYN_SENT src=192.168.0.24 dst=9.9.9.9 sport=41001 dport=443 [UNREPLIED] src=9.9.9.9 dst=192.168.0.24 sport=443 dport=41001 mark=0 use=1
