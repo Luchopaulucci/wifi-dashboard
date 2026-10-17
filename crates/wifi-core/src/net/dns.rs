@@ -160,6 +160,20 @@ fn extract_domains(line: &str) -> Vec<String> {
     out
 }
 
+pub fn is_noise_domain(s: &str) -> bool {
+    let d = s.trim_end_matches('.').to_ascii_lowercase();
+    d == "arpa"
+        || d.ends_with(".arpa")
+        || d == "local"
+        || d.ends_with(".local")
+        || d == "localhost"
+        || d.ends_with(".localhost")
+        || d == "invalid"
+        || d.ends_with(".invalid")
+        || d == "home.arpa"
+        || d.ends_with(".home.arpa")
+}
+
 fn is_domain(s: &str) -> bool {
     if s.len() < 4 || s.len() > 253 || !s.contains('.') {
         return false;
@@ -168,6 +182,9 @@ fn is_domain(s: &str) -> bool {
         return false;
     }
     if s.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    if is_noise_domain(s) {
         return false;
     }
     let labels: Vec<&str> = s.split('.').collect();
@@ -180,7 +197,7 @@ fn is_domain(s: &str) -> bool {
     }
     s.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        && !matches!(tld, "pid" | "fd" | "ms" | "est" | "skb")
+        && !matches!(tld, "pid" | "fd" | "ms" | "est" | "skb" | "arpa")
 }
 
 pub fn merge_domain_rows(mut rows: Vec<DnsDomainRow>) -> Vec<DnsDomainRow> {

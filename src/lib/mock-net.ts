@@ -230,6 +230,12 @@ export function mockBootTraffic(): BootTrafficReport {
     collected_at_ms: Date.now(),
     missing: [],
     privilege: null,
+    dns_monitor: {
+      running: true,
+      error: null,
+      needs_privilege: false,
+      explanation: "Modo simulado: el monitor DNS aparece como si estuviera corriendo.",
+    },
     limitations: [
       "Modo simulado. En la IdeaPad los números salen de /proc/net/* y systemd-resolved.",
       "Linux no guarda dominio×proceso desde el boot sin sniffer; Señal no captura paquetes.",
@@ -289,6 +295,19 @@ export function mockListeners(): ListenersReport {
     source: "ss -tulpn (simulado)",
     missing: [],
     notes: [],
+    alerts: [
+      {
+        protocol: "tcp",
+        local_ip: "192.168.0.24",
+        local_port: "8080",
+        process: "python3",
+        pid: 4444,
+        reach: "lan_address",
+        reach_label: "en una IP de esta PC (LAN)",
+        key: "tcp|192.168.0.24|8080|python3",
+        is_new: true,
+      },
+    ],
     rows: [
       {
         protocol: "tcp",
@@ -298,6 +317,7 @@ export function mockListeners(): ListenersReport {
         pid: 1010,
         reach: "network_all",
         reach_label: "alcanzable desde la red (0.0.0.0 / ::)",
+        key: "tcp|0.0.0.0|22|sshd",
         is_new: false,
       },
       {
@@ -308,6 +328,7 @@ export function mockListeners(): ListenersReport {
         pid: 777,
         reach: "local_only",
         reach_label: "solo local (127.0.0.1 / ::1)",
+        key: "tcp|127.0.0.1|631|cupsd",
         is_new: false,
       },
       {
@@ -318,6 +339,7 @@ export function mockListeners(): ListenersReport {
         pid: 4444,
         reach: "lan_address",
         reach_label: "en una IP de esta PC (LAN)",
+        key: "tcp|192.168.0.24|8080|python3",
         is_new: true,
       },
     ],
@@ -334,8 +356,9 @@ export function mockGeo(ip: string): GeoInfo {
       org: "Cloudflare, Inc.",
       asn: "AS13335",
       as_name: "CLOUDFLARENET",
-      source: "ip-api.com",
-      source_label: "consulta externa a ip-api.com (sin API key, máx. ~45/min, cacheada)",
+      source: "rdap.org",
+      source_label:
+        "consulta externa HTTPS a rdap.org: se envía solo esta IP (quién anunció el bloque / país del registro). Sin API key, cacheada. No se envía tu nombre ni IPs de la LAN.",
     };
   }
   return {
@@ -346,8 +369,9 @@ export function mockGeo(ip: string): GeoInfo {
     org: "Google Public DNS",
     asn: "AS15169",
     as_name: "GOOGLE",
-    source: "ip-api.com",
-    source_label: "consulta externa a ip-api.com (sin API key, máx. ~45/min, cacheada)",
+    source: "rdap.org",
+    source_label:
+      "consulta externa HTTPS a rdap.org: se envía solo esta IP (quién anunció el bloque / país del registro). Sin API key, cacheada. No se envía tu nombre ni IPs de la LAN.",
   };
 }
 

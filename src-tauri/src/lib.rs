@@ -1,13 +1,14 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 use wifi_core::net::{
     collect_boot_traffic, collect_connections, collect_firewall, collect_listeners, collect_nat,
-    default_gateway, listener_keys, monitor_rows, spawn_dns_monitor, start_trace,
-    BootTrafficReport, ConnectionsReport, FirewallReport, GeoCache, GeoInfo, ListenersReport,
-    NatReport, PtrCache,
+    default_gateway, geo_opt_in_denied_message, lookup_ip_external, monitor_rows,
+    spawn_dns_monitor, start_trace, BootTrafficReport, ConnectionsReport, DnsMonitorStatus,
+    DnsProgramRow, FirewallReport, GeoCache, GeoInfo, ListenerSession, ListenersReport, NatReport,
+    PtrCache,
 };
 use wifi_core::{validate_host, AppCore, HistoryPoint, HistoryRange, Snapshot};
 
@@ -15,9 +16,11 @@ struct AppState {
     core: Mutex<AppCore>,
     ptr: Mutex<PtrCache>,
     geo: Mutex<GeoCache>,
-    listeners: Mutex<Option<HashSet<String>>>,
+    listeners: Mutex<ListenerSession>,
     trace_cancel: Mutex<Option<Arc<AtomicBool>>>,
     dns_monitor: Arc<Mutex<HashMap<String, u64>>>,
+    dns_monitor_status: Arc<Mutex<DnsMonitorStatus>>,
+    dns_programs: Mutex<HashMap<String, DnsProgramRow>>,
 }
 
 fn map_err(err: wifi_core::CoreError) -> String {
@@ -53,45 +56,94 @@ fn get_history(
     core.history(&target, range).map_err(map_err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_connections(state: tauri::State<AppState>) -> Result<ConnectionsReport, String> {
     let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
     Ok(collect_connections(&mut ptr))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_nat() -> Result<NatReport, String> {
     Ok(collect_nat())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_firewall() -> Result<FirewallReport, String> {
     Ok(collect_firewall())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_boot_traffic(state: tauri::State<AppState>) -> Result<BootTrafficReport, String> {
     let monitor = {
         let map = state.dns_monitor.lock().map_err(|e| e.to_string())?;
         monitor_rows(&map)
     };
+    let monitor_status = {
+        let s = state.dns_monitor_status.lock().map_err(|e| e.to_string())?;
+        s.clone()
+    };
     let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
     let conns = collect_connections(&mut ptr);
-    Ok(collect_boot_traffic(&monitor, &conns.rows))
+    let mut programs = state.dns_programs.lock().map_err(|e| e.to_string())?;
+    Ok(collect_boot_traffic(
+        &mut ptr,
+        &monitor,
+        &monitor_status,
+        &mut programs,
+        &conns.rows,
+    ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_listeners(state: tauri::State<AppState>) -> Result<ListenersReport, String> {
-    let mut prev = state.listeners.lock().map_err(|e| e.to_string())?;
-    let report = collect_listeners(prev.as_ref());
-    *prev = Some(listener_keys(&report.rows));
-    Ok(report)
+    let mut session = state.listeners.lock().map_err(|e| e.to_string())?;
+    Ok(collect_listeners(&mut session))
 }
 
 #[tauri::command]
-fn lookup_remote_ip(state: tauri::State<AppState>, ip: String) -> Result<GeoInfo, String> {
-    let mut geo = state.geo.lock().map_err(|e| e.to_string())?;
-    geo.get_or_lookup(ip.trim()).map_err(map_err)
+fn dismiss_listener(state: tauri::State<AppState>, key: String) -> Result<(), String> {
+    let mut session = state.listeners.lock().map_err(|e| e.to_string())?;
+    session.dismiss(&key);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn lookup_remote_ip(
+    state: tauri::State<AppState>,
+    ip: String,
+    allow_external: bool,
+) -> Result<GeoInfo, String> {
+    if !allow_external {
+        return Err(geo_opt_in_denied_message().into());
+    }
+    let ip = ip.trim().to_string();
+    {
+        let geo = state.geo.lock().map_err(|e| e.to_string())?;
+        if let Some(hit) = geo.get(&ip) {
+            return Ok(hit);
+        }
+    }
+    let delay = {
+        let mut geo = state.geo.lock().map_err(|e| e.to_string())?;
+        geo.take_rate_delay()
+    };
+    if !delay.is_zero() {
+        std::thread::sleep(delay);
+    }
+    {
+        let mut geo = state.geo.lock().map_err(|e| e.to_string())?;
+        geo.mark_rate();
+        if let Some(hit) = geo.get(&ip) {
+            return Ok(hit);
+        }
+    }
+    // HTTP fuera de cualquier lock.
+    let info = lookup_ip_external(&ip).map_err(map_err)?;
+    {
+        let mut geo = state.geo.lock().map_err(|e| e.to_string())?;
+        geo.insert(ip, info.clone());
+    }
+    Ok(info)
 }
 
 #[tauri::command]
@@ -137,15 +189,18 @@ pub fn run() {
             let db = dir.join("senal.db");
             let core = AppCore::open(db).map_err(|e| e.to_string())?;
             let dns_monitor = Arc::new(Mutex::new(HashMap::new()));
+            let dns_monitor_status = Arc::new(Mutex::new(DnsMonitorStatus::default()));
             let dns_cancel = Arc::new(AtomicBool::new(false));
-            spawn_dns_monitor(dns_monitor.clone(), dns_cancel);
+            spawn_dns_monitor(dns_monitor.clone(), dns_monitor_status.clone(), dns_cancel);
             app.manage(AppState {
                 core: Mutex::new(core),
                 ptr: Mutex::new(PtrCache::default()),
                 geo: Mutex::new(GeoCache::default()),
-                listeners: Mutex::new(None),
+                listeners: Mutex::new(ListenerSession::default()),
                 trace_cancel: Mutex::new(None),
                 dns_monitor,
+                dns_monitor_status,
+                dns_programs: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
@@ -159,6 +214,7 @@ pub fn run() {
             get_firewall,
             get_boot_traffic,
             get_listeners,
+            dismiss_listener,
             lookup_remote_ip,
             start_trace_route,
             cancel_trace_route

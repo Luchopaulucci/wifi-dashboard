@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getClient } from "../../lib/client";
 import { formatMs } from "../../lib/format";
 import type { GeoInfo, PrivilegeHint, TraceHop } from "../../lib/types";
+import { GeoOptIn } from "./GeoOptIn";
 import { Notes } from "./Notes";
 import { TabHeader } from "./ExplainButton";
 
@@ -23,6 +24,7 @@ export function RouteView() {
   const [privilege, setPrivilege] = useState<PrivilegeHint | null>(null);
   const [busy, setBusy] = useState(false);
   const [ispGeo, setIspGeo] = useState<GeoInfo | null>(null);
+  const [geoEnabled, setGeoEnabled] = useState(false);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -64,12 +66,12 @@ export function RouteView() {
 
   useEffect(() => {
     const isp = hops.find((h) => h.kind === "isp_start" && h.address);
-    if (!isp?.address) return;
+    if (!isp?.address || !geoEnabled) return;
     let gone = false;
     (async () => {
       try {
         const client = await getClient();
-        const g = await client.lookupIp(isp.address!);
+        const g = await client.lookupIp(isp.address!, true);
         if (!gone) setIspGeo(g);
       } catch {
         /* lookup opcional */
@@ -78,7 +80,7 @@ export function RouteView() {
     return () => {
       gone = true;
     };
-  }, [hops]);
+  }, [hops, geoEnabled]);
 
   const onGo = async () => {
     setBusy(true);
@@ -105,9 +107,10 @@ export function RouteView() {
       <TabHeader
         tab="route"
         title="Ruta"
-        hint="Traceroute/tracepath al destino que elijas. Marcamos el router de casa, dónde aparece la primera IP pública (ISP) y los hops que no contestan."
+        hint="En Ubuntu usamos tracepath primero (UDP, sin root). Marcamos el router de casa, dónde aparece la primera IP pública (ISP) y los hops que no contestan. pmtu/asymm no son RTT."
       />
       {privilege ? <Notes privilege={privilege} /> : null}
+      <GeoOptIn enabled={geoEnabled} onChange={setGeoEnabled} />
       <form
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
