@@ -25,6 +25,281 @@ const ALLOWED_BINS: &[&str] = &[
 ];
 const BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
+/// Slot de argv: o un literal exacto, o un valor ya validado (iface/host/ipv4).
+#[derive(Clone, Copy, Debug)]
+enum ArgPat {
+    Exact(&'static str),
+    Iface,
+    Host,
+    Ipv4,
+}
+
+struct AllowedSpec {
+    bin: &'static str,
+    args: &'static [ArgPat],
+}
+
+const ALLOWED_COMMANDS: &[AllowedSpec] = &[
+    AllowedSpec {
+        bin: "nmcli",
+        args: &[
+            ArgPat::Exact("-t"),
+            ArgPat::Exact("-f"),
+            ArgPat::Exact("DEVICE,TYPE,STATE"),
+            ArgPat::Exact("device"),
+            ArgPat::Exact("status"),
+        ],
+    },
+    AllowedSpec {
+        bin: "nmcli",
+        args: &[
+            ArgPat::Exact("-t"),
+            ArgPat::Exact("device"),
+            ArgPat::Exact("show"),
+        ],
+    },
+    AllowedSpec {
+        bin: "nmcli",
+        args: &[
+            ArgPat::Exact("-t"),
+            ArgPat::Exact("device"),
+            ArgPat::Exact("show"),
+            ArgPat::Iface,
+        ],
+    },
+    AllowedSpec {
+        bin: "nmcli",
+        args: &[
+            ArgPat::Exact("-t"),
+            ArgPat::Exact("-f"),
+            ArgPat::Exact("IN-USE,BSSID,SSID,CHAN,FREQ,RATE,SIGNAL,SECURITY"),
+            ArgPat::Exact("device"),
+            ArgPat::Exact("wifi"),
+            ArgPat::Exact("list"),
+        ],
+    },
+    AllowedSpec {
+        bin: "nmcli",
+        args: &[
+            ArgPat::Exact("device"),
+            ArgPat::Exact("wifi"),
+            ArgPat::Exact("rescan"),
+        ],
+    },
+    AllowedSpec {
+        bin: "iw",
+        args: &[ArgPat::Exact("dev")],
+    },
+    AllowedSpec {
+        bin: "iw",
+        args: &[ArgPat::Exact("dev"), ArgPat::Iface, ArgPat::Exact("link")],
+    },
+    AllowedSpec {
+        bin: "iw",
+        args: &[ArgPat::Exact("dev"), ArgPat::Iface, ArgPat::Exact("info")],
+    },
+    AllowedSpec {
+        bin: "ip",
+        args: &[
+            ArgPat::Exact("-4"),
+            ArgPat::Exact("route"),
+            ArgPat::Exact("show"),
+            ArgPat::Exact("default"),
+        ],
+    },
+    AllowedSpec {
+        bin: "ip",
+        args: &[
+            ArgPat::Exact("route"),
+            ArgPat::Exact("show"),
+            ArgPat::Exact("default"),
+        ],
+    },
+    AllowedSpec {
+        bin: "ip",
+        args: &[
+            ArgPat::Exact("-4"),
+            ArgPat::Exact("-o"),
+            ArgPat::Exact("addr"),
+            ArgPat::Exact("show"),
+        ],
+    },
+    AllowedSpec {
+        bin: "ip",
+        args: &[
+            ArgPat::Exact("-4"),
+            ArgPat::Exact("-o"),
+            ArgPat::Exact("addr"),
+            ArgPat::Exact("show"),
+            ArgPat::Exact("dev"),
+            ArgPat::Iface,
+        ],
+    },
+    AllowedSpec {
+        bin: "ip",
+        args: &[ArgPat::Exact("neigh"), ArgPat::Exact("show")],
+    },
+    AllowedSpec {
+        bin: "ping",
+        args: &[
+            ArgPat::Exact("-c"),
+            ArgPat::Exact("1"),
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("-W"),
+            ArgPat::Exact("1"),
+            ArgPat::Ipv4,
+        ],
+    },
+    AllowedSpec {
+        bin: "avahi-resolve-address",
+        args: &[ArgPat::Ipv4],
+    },
+    AllowedSpec {
+        bin: "ss",
+        args: &[ArgPat::Exact("-H"), ArgPat::Exact("-tunap")],
+    },
+    AllowedSpec {
+        bin: "ss",
+        args: &[ArgPat::Exact("-tunap")],
+    },
+    AllowedSpec {
+        bin: "ss",
+        args: &[ArgPat::Exact("-H"), ArgPat::Exact("-tulpn")],
+    },
+    AllowedSpec {
+        bin: "ss",
+        args: &[ArgPat::Exact("-tulpn")],
+    },
+    AllowedSpec {
+        bin: "conntrack",
+        args: &[ArgPat::Exact("-L")],
+    },
+    AllowedSpec {
+        bin: "nft",
+        args: &[ArgPat::Exact("list"), ArgPat::Exact("ruleset")],
+    },
+    AllowedSpec {
+        bin: "iptables-save",
+        args: &[ArgPat::Exact("-c")],
+    },
+    AllowedSpec {
+        bin: "iptables",
+        args: &[ArgPat::Exact("-S")],
+    },
+    AllowedSpec {
+        bin: "resolvectl",
+        args: &[ArgPat::Exact("statistics")],
+    },
+    AllowedSpec {
+        bin: "resolvectl",
+        args: &[ArgPat::Exact("show-cache")],
+    },
+    AllowedSpec {
+        bin: "resolvectl",
+        args: &[ArgPat::Exact("monitor")],
+    },
+    AllowedSpec {
+        bin: "journalctl",
+        args: &[
+            ArgPat::Exact("-u"),
+            ArgPat::Exact("systemd-resolved"),
+            ArgPat::Exact("-b"),
+            ArgPat::Exact("--no-pager"),
+            ArgPat::Exact("-o"),
+            ArgPat::Exact("cat"),
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("4000"),
+        ],
+    },
+    AllowedSpec {
+        bin: "traceroute",
+        args: &[
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("-q"),
+            ArgPat::Exact("1"),
+            ArgPat::Exact("-w"),
+            ArgPat::Exact("2"),
+            ArgPat::Exact("--"),
+            ArgPat::Host,
+        ],
+    },
+    AllowedSpec {
+        bin: "traceroute",
+        args: &[
+            ArgPat::Exact("-6"),
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("-q"),
+            ArgPat::Exact("1"),
+            ArgPat::Exact("-w"),
+            ArgPat::Exact("2"),
+            ArgPat::Exact("--"),
+            ArgPat::Host,
+        ],
+    },
+    AllowedSpec {
+        bin: "traceroute6",
+        args: &[
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("-q"),
+            ArgPat::Exact("1"),
+            ArgPat::Exact("-w"),
+            ArgPat::Exact("2"),
+            ArgPat::Exact("--"),
+            ArgPat::Host,
+        ],
+    },
+    AllowedSpec {
+        bin: "tracepath",
+        args: &[ArgPat::Exact("-n"), ArgPat::Exact("--"), ArgPat::Host],
+    },
+    AllowedSpec {
+        bin: "tracepath",
+        args: &[
+            ArgPat::Exact("-6"),
+            ArgPat::Exact("-n"),
+            ArgPat::Exact("--"),
+            ArgPat::Host,
+        ],
+    },
+    AllowedSpec {
+        bin: "tracepath6",
+        args: &[ArgPat::Exact("-n"), ArgPat::Exact("--"), ArgPat::Host],
+    },
+];
+
+impl AllowedSpec {
+    fn matches(&self, name: &str, args: &[&str]) -> bool {
+        if self.bin != name || self.args.len() != args.len() {
+            return false;
+        }
+        self.args
+            .iter()
+            .zip(args.iter())
+            .all(|(pat, got)| match pat {
+                ArgPat::Exact(s) => *got == *s,
+                ArgPat::Iface => validate_iface(got).is_ok(),
+                ArgPat::Host => validate_host(got).is_ok(),
+                ArgPat::Ipv4 => validate_ipv4(got).is_ok(),
+            })
+    }
+}
+
+/// Allowlist por binario **y** argv exacto (slots validados aparte).
+pub fn args_are_allowed(name: &str, args: &[&str]) -> bool {
+    ALLOWED_COMMANDS.iter().any(|spec| spec.matches(name, args))
+}
+
+fn ensure_args_allowed(name: &str, args: &[&str]) -> Result<()> {
+    if args_are_allowed(name, args) {
+        Ok(())
+    } else {
+        Err(CoreError::CommandNotAllowed(format!(
+            "{name} {}",
+            args.join(" ")
+        )))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CmdOutput {
     pub stdout: String,
@@ -146,6 +421,7 @@ pub fn run_cmd(name: &str, args: &[&str]) -> Result<String> {
 }
 
 pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<String> {
+    ensure_args_allowed(name, args)?;
     let bin = resolve_bin(name)?;
     let mut cmd = Command::new(&bin);
     cmd.args(args.iter().map(OsStr::new));
@@ -180,6 +456,7 @@ pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<S
 /// Como `run_cmd`, pero no falla por código de salida ≠ 0 (sirve para
 /// detectar "permission denied" vs reglas vacías vs traceroute con hops *).
 pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
+    ensure_args_allowed(name, args)?;
     let bin = resolve_bin(name)?;
     let mut cmd = Command::new(&bin);
     cmd.args(args.iter().map(OsStr::new));
@@ -202,7 +479,10 @@ pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<C
 }
 
 /// Lanza un binario permitido con stdout/stderr en pipe. El caller drena.
-pub fn spawn_allowed(name: &str, args: &[&str]) -> Result<std::process::Child> {
+/// `timeout` en cero = sin watchdog (p.ej. `resolvectl monitor`). Si no, un
+/// hilo mata el proceso al vencerse el tiempo.
+pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std::process::Child> {
+    ensure_args_allowed(name, args)?;
     let bin = resolve_bin(name)?;
     let mut cmd = Command::new(&bin);
     cmd.args(args.iter().map(OsStr::new));
@@ -212,10 +492,26 @@ pub fn spawn_allowed(name: &str, args: &[&str]) -> Result<std::process::Child> {
     cmd.env("LANG", "C");
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.spawn().map_err(|e| CoreError::CommandFailed {
+    let child = cmd.spawn().map_err(|e| CoreError::CommandFailed {
         comando: name.to_string(),
         detalle: e.to_string(),
-    })
+    })?;
+    if !timeout.is_zero() {
+        watchdog_kill(child.id(), timeout);
+    }
+    Ok(child)
+}
+
+fn watchdog_kill(pid: u32, timeout: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        for path in ["/bin/kill", "/usr/bin/kill"] {
+            if Path::new(path).is_file() {
+                let _ = Command::new(path).args(["-9", &pid.to_string()]).status();
+                return;
+            }
+        }
+    });
 }
 
 fn wait_with_timeout(
@@ -362,6 +658,35 @@ mod tests {
             resolve_bin("sh"),
             Err(CoreError::CommandNotAllowed(_))
         ));
+    }
+
+    #[test]
+    fn argv_must_match_exactly() {
+        assert!(args_are_allowed("nft", &["list", "ruleset"]));
+        assert!(args_are_allowed("ss", &["-H", "-tulpn"]));
+        assert!(args_are_allowed("conntrack", &["-L"]));
+        assert!(args_are_allowed("tracepath", &["-n", "--", "1.1.1.1"]));
+        assert!(args_are_allowed(
+            "journalctl",
+            &[
+                "-u",
+                "systemd-resolved",
+                "-b",
+                "--no-pager",
+                "-o",
+                "cat",
+                "-n",
+                "4000"
+            ]
+        ));
+        assert!(!args_are_allowed("nft", &["flush", "ruleset"]));
+        assert!(!args_are_allowed("nft", &["list"]));
+        assert!(!args_are_allowed("ss", &["-tunap", "-a"]));
+        assert!(!args_are_allowed("conntrack", &["-D"]));
+        assert!(!args_are_allowed("iptables", &["-F"]));
+        assert!(!args_are_allowed("bash", &["-c", "id"]));
+        assert!(!args_are_allowed("tracepath", &["-n", "--", "-n"]));
+        assert!(ensure_args_allowed("nft", &["flush", "ruleset"]).is_err());
     }
 
     #[test]

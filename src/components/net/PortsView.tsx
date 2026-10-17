@@ -24,20 +24,40 @@ export function PortsView() {
     return () => window.clearInterval(id);
   }, [refresh]);
 
-  const news = data?.rows.filter((r) => r.is_new) ?? [];
+  const alerts = data?.alerts ?? [];
+
+  const onDismiss = async (key: string) => {
+    setData((prev) =>
+      prev
+        ? {
+            ...prev,
+            alerts: prev.alerts.filter((a) => a.key !== key),
+            new_count: Math.max(0, prev.new_count - 1),
+            rows: prev.rows.map((r) => (r.key === key ? { ...r, is_new: false } : r)),
+          }
+        : prev,
+    );
+    try {
+      const client = await getClient();
+      await client.dismissListener(key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      void refresh();
+    }
+  };
 
   return (
     <section className="space-y-6">
       <TabHeader
         tab="ports"
         title="Puertos abiertos"
-        hint="Sockets en LISTEN (`ss -tulpn`): proceso, si es solo local o alcanzable desde la red. Avisamos cuando aparece uno nuevo respecto de la foto anterior de esta sesión."
+        hint="Sockets en LISTEN (`ss -tulpn`): proceso, si es solo local o alcanzable desde la red. Avisamos contra la foto inicial de esta sesión; la alerta queda hasta que la descartes. UDP efímero se ignora."
       />
       {error ? (
         <p className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm">{error}</p>
       ) : null}
       {data ? <Notes notes={data.notes} missing={data.missing} /> : null}
-      {news.length ? (
+      {alerts.length ? (
         <div
           role="status"
           data-testid="new-listener-alert"
@@ -46,10 +66,24 @@ export function PortsView() {
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-amber-200">
             Apareció un listener nuevo
           </p>
-          <ul className="mt-2 font-ui text-sm">
-            {news.map((r) => (
-              <li key={`${r.protocol}-${r.local_ip}-${r.local_port}`}>
-                {r.process ?? "proceso ?"} · {r.protocol} {r.local_ip}:{r.local_port} · {r.reach_label}
+          <ul className="mt-2 space-y-2 font-ui text-sm">
+            {alerts.map((r) => (
+              <li
+                key={r.key}
+                className="flex flex-wrap items-center justify-between gap-2"
+              >
+                <span>
+                  {r.process ?? "proceso ?"} · {r.protocol} {r.local_ip}:{r.local_port} ·{" "}
+                  {r.reach_label}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`dismiss-listener-${r.key}`}
+                  className="rounded-full bg-amber-400 px-3 py-1 text-[11px] font-semibold uppercase text-slate-950"
+                  onClick={() => void onDismiss(r.key)}
+                >
+                  Descartar
+                </button>
               </li>
             ))}
           </ul>
@@ -69,7 +103,7 @@ export function PortsView() {
           <tbody>
             {(data?.rows ?? []).map((r) => (
               <tr
-                key={`${r.protocol}-${r.local_ip}-${r.local_port}-${r.pid ?? ""}`}
+                key={r.key || `${r.protocol}-${r.local_ip}-${r.local_port}-${r.pid ?? ""}`}
                 className={`border-t border-white/5 ${r.is_new ? "bg-amber-400/10" : ""}`}
               >
                 <td className="px-4 py-3">

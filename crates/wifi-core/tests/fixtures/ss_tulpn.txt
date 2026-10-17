@@ -5,4 +5,5 @@ tcp   LISTEN 0      511      127.0.0.1:1420         0.0.0.0:*    users:(("node",
 tcp   LISTEN 0      128          [::]:22              [::]:*     users:(("sshd",pid=1010,fd=4))
 udp   UNCONN 0      0          0.0.0.0:5353         0.0.0.0:*    users:(("avahi-daemon",pid=650,fd=12))
 udp   UNCONN 0      0        127.0.0.1:53           0.0.0.0:*    users:(("systemd-resolve",pid=612,fd=13))
+udp   UNCONN 0      0     192.168.0.24:47812         1.1.1.1:53   users:(("chrome",pid=9001,fd=19))
 tcp   LISTEN 0      128     192.168.0.24:8080       0.0.0.0:*    users:(("python3",pid=4444,fd=5))

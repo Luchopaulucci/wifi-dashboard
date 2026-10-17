@@ -3,3 +3,9 @@ Handling query metrics.ubuntu.com IN AAAA
 DNS query to 1.1.1.1 for daisy.ubuntu.com
 lookup api.snapcraft.io
 Handling query www.google.com IN A
+Handling query 1.0.0.127.in-addr.arpa IN PTR
+Handling query 8.8.8.8.in-addr.arpa IN PTR
+Handling query a.b.ip6.arpa IN PTR
+Handling query printer.home.arpa IN A
+Handling query foo.local IN A
+

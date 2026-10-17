@@ -1,11 +1,13 @@
 use std::net::IpAddr;
 
 use wifi_core::net::{
-    classify_hops, classify_reach, classify_talker, explain_rule_criollo, is_permission_error,
-    is_public_ip, parse_conntrack, parse_ip_api, parse_iptables_save, parse_journal_resolved,
-    parse_nft_ruleset, parse_proc_net_dev, parse_proc_net_netstat, parse_proc_net_snmp, parse_rdap,
+    apply_listener_session, classify_hops, classify_reach, classify_talker, explain_rule_criollo,
+    is_ephemeral_udp, is_noise_domain, is_permission_error, is_public_ip, parse_conntrack,
+    parse_ip_api, parse_iptables_save, parse_journal_resolved, parse_nft_ruleset,
+    parse_proc_net_dev, parse_proc_net_netstat, parse_proc_net_snmp, parse_rdap,
     parse_resolvectl_cache, parse_resolvectl_statistics, parse_ss_listeners, parse_ss_sockets,
-    parse_trace_line, snmp_counters, summarize_verdicts, Reachability, TraceHopKind,
+    parse_trace_line, privilege_hint, snmp_counters, summarize_verdicts, ListenerSession,
+    Reachability, TraceHopKind,
 };
 use wifi_core::validate_host;
 
@@ -50,6 +52,10 @@ fn ss_listeners_reachability() {
     assert_eq!(cups.reach, Reachability::LocalOnly);
     let py = rows.iter().find(|r| r.local_port == "8080").unwrap();
     assert_eq!(py.reach, Reachability::LanAddress);
+    let chrome = rows.iter().find(|r| r.local_port == "47812").unwrap();
+    assert!(is_ephemeral_udp(chrome));
+    let kept: Vec<_> = rows.into_iter().filter(|r| !is_ephemeral_udp(r)).collect();
+    assert!(kept.iter().all(|r| r.local_port != "47812"));
     assert_eq!(classify_reach("127.0.0.1"), Reachability::LocalOnly);
     assert_eq!(classify_reach("::1"), Reachability::LocalOnly);
     assert_eq!(classify_reach("0.0.0.0"), Reachability::NetworkAll);
@@ -156,6 +162,47 @@ fn traceroute_and_tracepath_hops() {
         .any(|h| h.kind == TraceHopKind::Localhost || h.hostname.as_deref() == Some("LOCALHOST")));
     assert!(tp.iter().any(|h| h.lost));
     assert!(tp.iter().any(|h| h.address.as_deref() == Some("8.8.8.8")));
+    let pmtu = tp
+        .iter()
+        .find(|h| h.address.as_deref() == Some("10.0.0.1"))
+        .unwrap();
+    assert_eq!(pmtu.rtt_ms, Some(8.050));
+    assert_ne!(pmtu.rtt_ms, Some(1492.0));
+    let asymm = tp
+        .iter()
+        .find(|h| h.address.as_deref() == Some("181.15.1.1"))
+        .unwrap();
+    assert_eq!(asymm.rtt_ms, Some(12.300));
+    assert_ne!(asymm.rtt_ms, Some(9.0));
+    assert!(tp.iter().all(|h| {
+        h.hostname
+            .as_deref()
+            .is_none_or(|n| !n.to_ascii_lowercase().ends_with("ms"))
+    }));
+    assert!(!tp
+        .iter()
+        .any(|h| h.rtt_ms == Some(1492.0) || h.rtt_ms == Some(9.0)));
+}
+
+#[test]
+fn listener_session_baseline_and_dismiss() {
+    let parsed = parse_ss_listeners(&fixture("ss_tulpn.txt"));
+    let mut session = ListenerSession::default();
+    let (first, _) = apply_listener_session(&mut session, parsed.clone());
+    assert!(first.iter().all(|r| !r.is_new));
+    assert!(first.iter().all(|r| r.local_port != "47812"));
+    let extra = {
+        let mut v = parsed;
+        if let Some(py) = v.iter_mut().find(|r| r.local_port == "8080") {
+            py.process = Some("otro".into());
+            py.key.clear();
+        }
+        v
+    };
+    let (second, _) = apply_listener_session(&mut session, extra);
+    assert!(second
+        .iter()
+        .any(|r| r.process.as_deref() == Some("otro") && r.is_new));
 }
 
 #[test]
@@ -190,6 +237,11 @@ fn dns_stats_cache_journal_talkers() {
         .find(|r| r.domain == "www.google.com")
         .unwrap();
     assert_eq!(g.count, 2);
+    assert!(journal.iter().all(|r| !is_noise_domain(&r.domain)));
+    assert!(journal.iter().all(|r| !r.domain.ends_with(".arpa")));
+    assert!(is_noise_domain("1.0.0.127.in-addr.arpa"));
+    assert!(is_noise_domain("a.b.ip6.arpa"));
+    assert!(is_noise_domain("printer.home.arpa"));
     assert!(classify_talker("metrics.ubuntu.com").is_some());
     assert!(classify_talker("daisy.ubuntu.com").unwrap().kind == "telemetria");
     assert!(classify_talker("api.snapcraft.io").unwrap().kind == "updates");
@@ -199,7 +251,7 @@ fn dns_stats_cache_journal_talkers() {
 fn geo_parsers_and_public_ip() {
     let g = parse_ip_api(&fixture("ip_api.json")).unwrap();
     assert_eq!(g.asn.as_deref(), Some("AS15169"));
-    assert!(g.source_label.contains("externa"));
+    assert!(!g.source_label.contains("ip-api.com") || g.source.contains("fixture"));
     let r = parse_rdap(&fixture("rdap.json"), "8.8.8.8").unwrap();
     assert_eq!(r.ip, "8.8.8.8");
     assert!(r.org.as_deref().unwrap().contains("Google") || r.source == "rdap.org");
@@ -211,6 +263,9 @@ fn geo_parsers_and_public_ip() {
 #[test]
 fn privilege_and_host_validation() {
     assert!(is_permission_error("Operation not permitted"));
+    let nft = privilege_hint("nft", "CAP_NET_ADMIN");
+    assert!(nft.commands.iter().any(|c| c == "sudo nft list ruleset"));
+    assert!(nft.commands.iter().all(|c| !c.contains("setcap")));
     assert!(validate_host("https://one.one.one.one/cdn-cgi").is_ok());
     assert!(validate_host("8.8.8.8;rm").is_err());
     let c = explain_rule_criollo("ct state invalid drop");

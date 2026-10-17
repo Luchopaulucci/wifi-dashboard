@@ -53,7 +53,7 @@ fn parse_ss_socket_line(line: &str) -> Option<ConnectionRow> {
 fn parse_ss_listener_line(line: &str) -> Option<ListenerRow> {
     let parsed = parse_ss_columns(line)?;
     let reach = classify_reach(&parsed.local_ip);
-    Some(ListenerRow {
+    let mut row = ListenerRow {
         protocol: parsed.proto,
         local_ip: parsed.local_ip,
         local_port: parsed.local_port,
@@ -61,8 +61,11 @@ fn parse_ss_listener_line(line: &str) -> Option<ListenerRow> {
         pid: parsed.pid,
         reach,
         reach_label: reach_label(reach),
+        key: String::new(),
         is_new: false,
-    })
+    };
+    row.key = listener_key(&row);
+    Some(row)
 }
 
 struct ParsedSs {
@@ -249,5 +252,23 @@ pub fn reach_label(reach: Reachability) -> String {
 }
 
 pub fn listener_key(row: &ListenerRow) -> String {
-    format!("{}|{}|{}", row.protocol, row.local_ip, row.local_port)
+    format!(
+        "{}|{}|{}|{}",
+        row.protocol,
+        row.local_ip,
+        row.local_port,
+        row.process.as_deref().unwrap_or("")
+    )
+}
+
+/// UDP de cliente (rango efímero típico ≥32768) no es un listener.
+pub fn is_ephemeral_udp(row: &ListenerRow) -> bool {
+    let proto = row.protocol.to_ascii_lowercase();
+    if !proto.starts_with("udp") {
+        return false;
+    }
+    row.local_port
+        .parse::<u16>()
+        .ok()
+        .is_some_and(|p| p >= 32768)
 }

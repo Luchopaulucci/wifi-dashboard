@@ -21,13 +21,14 @@ impl RateLimiter {
         }
     }
 
-    pub fn wait_if_needed(&mut self) {
-        if let Some(last) = self.last {
-            let elapsed = last.elapsed();
-            if elapsed < self.min_interval {
-                std::thread::sleep(self.min_interval - elapsed);
-            }
+    pub fn delay_until_ready(&self) -> Duration {
+        match self.last {
+            None => Duration::ZERO,
+            Some(last) => self.min_interval.saturating_sub(last.elapsed()),
         }
+    }
+
+    pub fn mark(&mut self) {
         self.last = Some(Instant::now());
     }
 }
@@ -47,6 +48,7 @@ struct IpApi {
     query: Option<String>,
 }
 
+/// Parser legado de fixtures. El lookup en vivo ya no habla con ip-api (HTTP en claro).
 pub fn parse_ip_api(json: &str) -> Result<GeoInfo> {
     let parsed: IpApi = serde_json::from_str(json).map_err(|e| CoreError::Parse(e.to_string()))?;
     if parsed.status.as_deref() == Some("fail") {
@@ -63,8 +65,8 @@ pub fn parse_ip_api(json: &str) -> Result<GeoInfo> {
         org: parsed.org,
         asn,
         as_name: parsed.asname.or(as_name),
-        source: "ip-api.com".into(),
-        source_label: "consulta externa a ip-api.com (sin API key, máx. ~45/min, cacheada)".into(),
+        source: "fixture-ip-api".into(),
+        source_label: "parser de fixture (ya no se consulta ip-api.com)".into(),
     })
 }
 
@@ -133,8 +135,16 @@ pub fn parse_rdap(json: &str, ip: &str) -> Result<GeoInfo> {
         asn: None,
         as_name: remark,
         source: "rdap.org".into(),
-        source_label: "consulta externa a RDAP (fallback, sin API key, cacheada)".into(),
+        source_label: rdap_source_label(),
     })
+}
+
+pub fn rdap_source_label() -> String {
+    "consulta externa HTTPS a rdap.org: se envía solo esta IP (quién anunció el bloque / país del registro). Sin API key, cacheada. No se envía tu nombre ni IPs de la LAN.".into()
+}
+
+pub fn geo_opt_in_denied_message() -> &'static str {
+    "Las consultas externas están apagadas (opt-in). Si las prendés, Señal manda SOLO esta IP pública por HTTPS a rdap.org para preguntar país y organización del bloque. No se manda tu nombre, tu red local ni otras IPs."
 }
 
 fn vcard_fn(v: &Option<serde_json::Value>) -> Option<String> {
@@ -158,27 +168,21 @@ pub fn lookup_ip_external(ip: &str) -> Result<GeoInfo> {
             "IP privada o no ruteable: no se consulta un servicio externo".into(),
         ));
     }
-    // Solo IPs literales ya parseadas: no hay SSRF por hostname.
-    let url = format!(
-        "http://ip-api.com/json/{parsed}?fields=status,message,country,countryCode,isp,org,as,asname,query"
-    );
-    if let Ok(body) = http_get_json(&url) {
-        if let Ok(mut info) = parse_ip_api(&body) {
-            if info.ip.is_empty() {
-                info.ip = parsed.to_string();
-            }
-            return Ok(info);
-        }
-    }
-    let rdap = format!("https://rdap.org/ip/{parsed}");
-    let body = http_get_json(&rdap)?;
+    // Solo IPs literales ya parseadas: no hay SSRF por hostname. Solo HTTPS.
+    let url = format!("https://rdap.org/ip/{parsed}");
+    let body = http_get_json(&url)?;
     parse_rdap(&body, &parsed.to_string())
 }
 
 fn http_get_json(url: &str) -> Result<String> {
+    if !url.starts_with("https://") {
+        return Err(CoreError::Forbidden(
+            "solo se permiten consultas HTTPS a registros externos".into(),
+        ));
+    }
     let resp = ureq::get(url)
         .set("User-Agent", "Senal/0.1 (read-only network diagnostics; https://github.com/Luchopaulucci/wifi-dashboard)")
-        .set("Accept", "application/json")
+        .set("Accept", "application/rdap+json, application/json")
         .timeout(Duration::from_secs(6))
         .call()
         .map_err(|e| CoreError::CommandFailed {
@@ -201,7 +205,6 @@ mod tests {
         assert_eq!(g.country_code.as_deref(), Some("US"));
         assert_eq!(g.asn.as_deref(), Some("AS15169"));
         assert_eq!(g.as_name.as_deref(), Some("GOOGLE"));
-        assert!(g.source_label.contains("externa"));
     }
 
     #[test]
@@ -209,5 +212,12 @@ mod tests {
         assert!(lookup_ip_external("192.168.0.1").is_err());
         assert!(lookup_ip_external("127.0.0.1").is_err());
         assert!(lookup_ip_external("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn http_get_rejects_cleartext() {
+        let err = http_get_json("http://ip-api.com/json/1.1.1.1").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("HTTPS") || msg.contains("https"), "{msg}");
     }
 }
