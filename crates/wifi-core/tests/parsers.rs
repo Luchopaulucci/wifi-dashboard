@@ -1,6 +1,7 @@
 use wifi_core::{
-    parse_ip_neigh, parse_iw_info, parse_iw_link, parse_nmcli_device_show, parse_nmcli_wifi_list,
-    parse_ping_latency, parse_ping_stats, parse_proc_wireless, split_nmcli_terse, Band,
+    neighbor_is_live, parse_ip_neigh, parse_iw_info, parse_iw_link, parse_nmcli_device_show,
+    parse_nmcli_wifi_list, parse_ping_latency, parse_ping_stats, parse_proc_wireless,
+    split_nmcli_terse, Band,
 };
 
 fn fixture(name: &str) -> String {
@@ -88,6 +89,19 @@ fn ip_neigh_skips_failed_and_ipv6() {
     let gw = devices.iter().find(|d| d.ip == "192.168.0.1").unwrap();
     assert_eq!(gw.mac.as_deref(), Some("aa:bb:cc:11:22:33"));
     assert_eq!(gw.state, "REACHABLE");
+}
+
+#[test]
+fn ip_neigh_skips_incomplete() {
+    assert!(!neighbor_is_live("INCOMPLETE"));
+    assert!(!neighbor_is_live("FAILED"));
+    assert!(neighbor_is_live("REACHABLE"));
+    assert!(neighbor_is_live("STALE"));
+    assert!(neighbor_is_live("DELAY"));
+    let devices = parse_ip_neigh(&fixture("ip_neigh.txt"));
+    let ips: Vec<_> = devices.iter().map(|d| d.ip.as_str()).collect();
+    assert!(!ips.contains(&"192.168.0.50"));
+    assert!(!ips.contains(&"192.168.0.99"));
 }
 
 #[test]

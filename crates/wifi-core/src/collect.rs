@@ -11,8 +11,8 @@ use crate::congestion::congestion_bars;
 use crate::error::{CoreError, Result};
 use crate::oui::lookup_vendor;
 use crate::parse::{
-    merge_live, parse_ip_addr_v4, parse_ip_neigh, parse_ip_route_default, parse_iw_dev,
-    parse_iw_info, parse_iw_link, parse_nmcli_device_show, parse_nmcli_device_status,
+    merge_live, neighbor_is_live, parse_ip_addr_v4, parse_ip_neigh, parse_ip_route_default,
+    parse_iw_dev, parse_iw_info, parse_iw_link, parse_nmcli_device_show, parse_nmcli_device_status,
     parse_nmcli_wifi_list, parse_ping_latency, parse_proc_wireless, parse_resolv_conf,
 };
 use crate::types::{LanDevice, LiveWifi, NearbyNetwork};
@@ -242,6 +242,9 @@ pub fn collect_nearby(force_rescan: bool, cache: &mut CollectCache) -> Result<Ve
 }
 
 pub fn collect_devices(live: &LiveWifi, do_sweep: bool) -> Result<Vec<LanDevice>> {
+    if do_sweep {
+        LanSweep::ensure_ready(bin_exists("ping"), bin_exists("ip"))?;
+    }
     if !bin_exists("ip") {
         return Ok(Vec::new());
     }
@@ -257,15 +260,20 @@ pub fn collect_devices(live: &LiveWifi, do_sweep: bool) -> Result<Vec<LanDevice>
     }
 
     if do_sweep {
-        if let Some(net) = subnet {
-            LanSweep::apply(&net, &mut devices)?;
-            if let Ok(text) = run_cmd("ip", &["neigh", "show"]) {
-                let mut again = parse_ip_neigh(&text);
-                again.retain(|d| ip_in_subnet(&d.ip, &net));
-                LanSweep::merge_neighbors(&mut devices, again);
-            }
+        let Some(net) = subnet else {
+            return Err(CoreError::Parse(
+                "sin subred conectada para buscar equipos".into(),
+            ));
+        };
+        LanSweep::apply(&net, &mut devices, live.ip.as_deref())?;
+        if let Ok(text) = run_cmd("ip", &["neigh", "show"]) {
+            let mut again = parse_ip_neigh(&text);
+            again.retain(|d| ip_in_subnet(&d.ip, &net));
+            LanSweep::merge_neighbors(&mut devices, again);
         }
     }
+
+    LanSweep::drop_self(&mut devices, live.ip.as_deref());
 
     let gw = live.gateway.as_deref();
     for d in &mut devices {
@@ -275,7 +283,7 @@ pub fn collect_devices(live: &LiveWifi, do_sweep: bool) -> Result<Vec<LanDevice>
         }
         d.hostname = resolve_hostname(&d.ip);
     }
-    devices.sort_by(|a, b| a.ip.cmp(&b.ip));
+    LanSweep::sort_by_ip(&mut devices);
     Ok(devices)
 }
 
@@ -378,8 +386,26 @@ pub struct LanSweep;
 impl LanSweep {
     const MAX_IN_FLIGHT: usize = 32;
 
-    pub fn apply(net: &Ipv4Subnet, devices: &mut Vec<LanDevice>) -> Result<()> {
-        let existing: HashSet<String> = devices.iter().map(|d| d.ip.clone()).collect();
+    pub fn ensure_ready(has_ping: bool, has_ip: bool) -> Result<()> {
+        if !has_ip {
+            return Err(CoreError::BinaryMissing("ip".into()));
+        }
+        if !has_ping {
+            return Err(CoreError::BinaryMissing("ping".into()));
+        }
+        Ok(())
+    }
+
+    pub fn apply(
+        net: &Ipv4Subnet,
+        devices: &mut Vec<LanDevice>,
+        skip_ip: Option<&str>,
+    ) -> Result<()> {
+        Self::ensure_ready(bin_exists("ping"), true)?;
+        let mut existing: HashSet<String> = devices.iter().map(|d| d.ip.clone()).collect();
+        if let Some(ip) = skip_ip {
+            existing.insert(ip.to_string());
+        }
         let targets: Vec<String> = net
             .host_ips()?
             .into_iter()
@@ -394,6 +420,9 @@ impl LanSweep {
 
     pub fn merge_neighbors(devices: &mut Vec<LanDevice>, neighbors: Vec<LanDevice>) {
         for neigh in neighbors {
+            if !neighbor_is_live(&neigh.state) {
+                continue;
+            }
             if let Some(existing) = devices.iter_mut().find(|d| d.ip == neigh.ip) {
                 if existing.mac.is_none() {
                     existing.mac = neigh.mac;
@@ -404,10 +433,22 @@ impl LanSweep {
                 if neigh.state != "UNKNOWN" {
                     existing.state = neigh.state;
                 }
-            } else {
-                devices.push(neigh);
             }
         }
+    }
+
+    pub fn drop_self(devices: &mut Vec<LanDevice>, self_ip: Option<&str>) {
+        if let Some(ip) = self_ip {
+            devices.retain(|d| d.ip != ip);
+        }
+    }
+
+    pub fn sort_by_ip(devices: &mut [LanDevice]) {
+        devices.sort_by(|a, b| Self::ip_key(&a.ip).cmp(&Self::ip_key(&b.ip)));
+    }
+
+    fn ip_key(ip: &str) -> u32 {
+        ip.parse::<Ipv4Addr>().map(u32::from).unwrap_or(u32::MAX)
     }
 
     /// Un host está vivo si el output de ping trae `time=…`.
@@ -570,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_neighbors_keeps_ping_hosts_and_arp_macs() {
+    fn merge_neighbors_only_enriches_confirmed_hosts() {
         let mut devices = vec![LanDevice {
             ip: "192.168.0.18".into(),
             mac: None,
@@ -583,11 +624,65 @@ mod tests {
         let path = format!("{}/tests/fixtures/ip_neigh.txt", env!("CARGO_MANIFEST_DIR"));
         let neigh = parse_ip_neigh(&std::fs::read_to_string(path).unwrap());
         LanSweep::merge_neighbors(&mut devices, neigh);
+        LanSweep::merge_neighbors(
+            &mut devices,
+            vec![dummy_device_state("192.168.0.77", "INCOMPLETE")],
+        );
         let stale = devices.iter().find(|d| d.ip == "192.168.0.18").unwrap();
         assert_eq!(stale.mac.as_deref(), Some("f8:a4:5f:aa:bb:cc"));
         assert_eq!(stale.state, "STALE");
-        assert!(devices.iter().any(|d| d.ip == "192.168.0.1"));
-        assert!(devices.iter().any(|d| d.ip == "192.168.0.40"));
+        assert_eq!(devices.len(), 1);
         assert!(!devices.iter().any(|d| d.ip == "192.168.0.99"));
+        assert!(!devices.iter().any(|d| d.ip == "192.168.0.50"));
+        assert!(!devices.iter().any(|d| d.ip == "192.168.0.77"));
+    }
+
+    #[test]
+    fn missing_ping_is_error_not_empty_ok() {
+        let err = LanSweep::ensure_ready(false, true).unwrap_err();
+        assert!(matches!(err, CoreError::BinaryMissing(ref b) if b == "ping"));
+        assert!(err.to_string().contains("ping"));
+        assert!(LanSweep::ensure_ready(true, false).is_err());
+        assert!(LanSweep::ensure_ready(true, true).is_ok());
+    }
+
+    #[test]
+    fn devices_sort_ips_numerically() {
+        let mut devices = vec![
+            dummy_device("192.168.0.166"),
+            dummy_device("192.168.0.20"),
+            dummy_device("192.168.0.2"),
+        ];
+        LanSweep::sort_by_ip(&mut devices);
+        let ips: Vec<_> = devices.iter().map(|d| d.ip.as_str()).collect();
+        assert_eq!(ips, ["192.168.0.2", "192.168.0.20", "192.168.0.166"]);
+    }
+
+    #[test]
+    fn devices_drop_own_ip() {
+        let mut devices = vec![
+            dummy_device("192.168.0.1"),
+            dummy_device("192.168.0.24"),
+            dummy_device("192.168.0.18"),
+        ];
+        LanSweep::drop_self(&mut devices, Some("192.168.0.24"));
+        let ips: Vec<_> = devices.iter().map(|d| d.ip.as_str()).collect();
+        assert_eq!(ips, ["192.168.0.1", "192.168.0.18"]);
+    }
+
+    fn dummy_device(ip: &str) -> LanDevice {
+        dummy_device_state(ip, "PING")
+    }
+
+    fn dummy_device_state(ip: &str, state: &str) -> LanDevice {
+        LanDevice {
+            ip: ip.into(),
+            mac: None,
+            iface: None,
+            state: state.into(),
+            hostname: None,
+            vendor: None,
+            is_gateway: false,
+        }
     }
 }

@@ -21,8 +21,9 @@ pub use engine::{AppCore, INTERNET_TARGETS};
 pub use error::{CoreError, Result};
 pub use mock::MOCK_REASON;
 pub use parse::{
-    parse_ip_neigh, parse_iw_info, parse_iw_link, parse_nmcli_device_show, parse_nmcli_wifi_list,
-    parse_ping_latency, parse_ping_stats, parse_proc_wireless, split_nmcli_terse,
+    neighbor_is_live, parse_ip_neigh, parse_iw_info, parse_iw_link, parse_nmcli_device_show,
+    parse_nmcli_wifi_list, parse_ping_latency, parse_ping_stats, parse_proc_wireless,
+    split_nmcli_terse,
 };
 pub use store::Store;
 pub use types::{

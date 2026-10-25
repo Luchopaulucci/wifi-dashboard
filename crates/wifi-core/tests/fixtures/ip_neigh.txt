@@ -2,5 +2,6 @@
 192.168.0.18 dev wlp2s0 lladdr f8:a4:5f:aa:bb:cc STALE
 192.168.0.40 dev wlp2s0 lladdr a4:77:33:11:22:33 DELAY
 192.168.0.99 dev wlp2s0 FAILED
+192.168.0.50 dev wlp2s0 INCOMPLETE
 fe80::1 dev wlp2s0 lladdr aa:bb:cc:11:22:33 router REACHABLE
 10.8.0.1 dev tun0 lladdr 00:11:22:33:44:55 REACHABLE
