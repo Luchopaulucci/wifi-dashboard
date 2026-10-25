@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 use wifi_core::net::{
-    collect_boot_traffic, collect_connections, collect_firewall, collect_nat, default_gateway,
-    geo_opt_in_denied_message, lookup_ip_external, monitor_rows, spawn_dns_monitor, start_trace,
-    BootTrafficReport, ConnectionsReport, DnsMonitorStatus, DnsProgramRow, ElevateError,
-    FirewallReport, GeoCache, GeoInfo, ListenerSession, ListenersReport, NatReport,
+    alloc_trace_session, collect_boot_traffic, collect_connections, collect_firewall, collect_nat,
+    default_gateway, geo_opt_in_denied_message, lookup_ip_external, monitor_rows, spawn_dns_monitor,
+    start_trace, BootTrafficReport, ConnectionsReport, DnsMonitorStatus, DnsProgramRow,
+    ElevateError, FirewallReport, GeoCache, GeoInfo, ListenerSession, ListenersReport, NatReport,
     PrivilegedAction, PtrCache,
 };
-use wifi_core::{validate_host, AppCore, HistoryPoint, HistoryRange, Snapshot};
+use wifi_core::{AppCore, HistoryPoint, HistoryRange, Snapshot};
 
 struct AppState {
     core: Mutex<AppCore>,
@@ -384,7 +384,7 @@ fn start_trace_route(
     destination: String,
     elevated: Option<bool>,
 ) -> Result<String, String> {
-    let dest = validate_host(&destination).map_err(map_err)?;
+    let (dest, session_id) = alloc_trace_session(&destination).map_err(map_err)?;
     if let Some(flag) = state.trace_cancel.lock().map_err(|e| e.to_string())?.take() {
         flag.store(true, Ordering::Relaxed);
     }
@@ -392,12 +392,13 @@ fn start_trace_route(
     *state.trace_cancel.lock().map_err(|e| e.to_string())? = Some(cancel.clone());
     let gw = default_gateway();
     let elevate = elevated.unwrap_or(false);
+    let sid = session_id.clone();
     std::thread::spawn(move || {
-        let _ = start_trace(&dest, gw.as_deref(), cancel, elevate, |ev| {
+        let _ = start_trace(&dest, gw.as_deref(), cancel, elevate, sid, |ev| {
             let _ = app.emit("trace-progress", ev);
         });
     });
-    Ok("ok".into())
+    Ok(session_id)
 }
 
 #[tauri::command]

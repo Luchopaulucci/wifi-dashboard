@@ -645,6 +645,7 @@ pub mod test_runner {
         static REPLY: RefCell<Option<CmdOutput>> = const { RefCell::new(None) };
         static ARGV: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) };
         static SLOW_STDERR: RefCell<Option<u64>> = const { RefCell::new(None) };
+        static SPAWN_SCRIPTS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     }
 
     pub struct Guard;
@@ -657,6 +658,7 @@ pub mod test_runner {
             REPLY.with(|r| *r.borrow_mut() = None);
             ARGV.with(|a| a.borrow_mut().clear());
             SLOW_STDERR.with(|s| *s.borrow_mut() = None);
+            SPAWN_SCRIPTS.with(|m| m.borrow_mut().clear());
         }
     }
 
@@ -674,6 +676,12 @@ pub mod test_runner {
     pub fn hide_bin(name: &str) {
         HIDDEN.with(|h| {
             h.borrow_mut().insert(name.to_string());
+        });
+    }
+
+    pub fn unhide_bin(name: &str) {
+        HIDDEN.with(|h| {
+            h.borrow_mut().remove(name);
         });
     }
 
@@ -702,31 +710,43 @@ pub mod test_runner {
         SLOW_STDERR.with(|s| *s.borrow_mut() = Some(hold_secs));
     }
 
+    pub fn set_spawn_script(name: &str, script: &str) {
+        SPAWN_SCRIPTS.with(|m| {
+            m.borrow_mut().insert(name.to_string(), script.to_string());
+        });
+    }
+
+    fn spawn_script(name: &str, args: &[&str], script: &str) -> Result<std::process::Child> {
+        let resolved =
+            resolve_override(name).unwrap_or_else(|| PathBuf::from(format!("/usr/bin/{name}")));
+        let mut argv = vec![resolved.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        ARGV.with(|a| a.borrow_mut().push(argv));
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| CoreError::CommandFailed {
+                comando: name.to_string(),
+                detalle: e.to_string(),
+            })
+    }
+
     pub(super) fn spawn_override(name: &str, args: &[&str]) -> Option<Result<std::process::Child>> {
         if !ENABLED.with(|e| *e.borrow()) {
             return None;
         }
-        let hold = SLOW_STDERR.with(|s| *s.borrow())?;
-        if name != "pkexec" {
-            return None;
+        if let Some(hold) = SLOW_STDERR.with(|s| *s.borrow()) {
+            if name == "pkexec" {
+                let script =
+                    format!("sleep {hold} >&2 & printf ' 1  1.1.1.1  1.000 ms\\n'; exec sleep 30");
+                return Some(spawn_script(name, args, &script));
+            }
         }
-        let pkexec = resolve_override("pkexec").unwrap_or_else(|| PathBuf::from("/usr/bin/pkexec"));
-        let mut argv = vec![pkexec.to_string_lossy().into_owned()];
-        argv.extend(args.iter().map(|s| (*s).to_string()));
-        ARGV.with(|a| a.borrow_mut().push(argv));
-        let script = format!("printf ' 1  1.1.1.1  1.000 ms\\n'; sleep {hold} >&2 & exec sleep 30");
-        Some(
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(script)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|e| CoreError::CommandFailed {
-                    comando: name.to_string(),
-                    detalle: e.to_string(),
-                }),
-        )
+        let script = SPAWN_SCRIPTS.with(|m| m.borrow().get(name).cloned())?;
+        Some(spawn_script(name, args, &script))
     }
 
     pub(super) fn resolve_override(name: &str) -> Option<PathBuf> {
