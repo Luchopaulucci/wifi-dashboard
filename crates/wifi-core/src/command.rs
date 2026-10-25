@@ -22,8 +22,20 @@ const ALLOWED_BINS: &[&str] = &[
     "tracepath6",
     "resolvectl",
     "journalctl",
+    "pkexec",
 ];
 const BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// pkexec necesita el bus de sesión y el display para el diálogo de polkit.
+/// El resto del entorno sigue limpio (PATH fijo, LC_ALL=C).
+const PKEXEC_ENV_KEEP: &[&str] = &[
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+];
 
 /// Slot de argv: o un literal exacto, o un valor ya validado (iface/host/ipv4).
 #[derive(Clone, Copy, Debug)]
@@ -286,7 +298,29 @@ impl AllowedSpec {
 
 /// Allowlist por binario **y** argv exacto (slots validados aparte).
 pub fn args_are_allowed(name: &str, args: &[&str]) -> bool {
+    if name == "pkexec" {
+        return pkexec_inner_allowed(args);
+    }
     ALLOWED_COMMANDS.iter().any(|spec| spec.matches(name, args))
+}
+
+/// `pkexec <ruta allowlisted> <args fijos del binario interno>`.
+/// El interno tiene que pasar la misma allowlist de argv; no hay pkexec anidado.
+fn pkexec_inner_allowed(args: &[&str]) -> bool {
+    let Some((target, rest)) = args.split_first() else {
+        return false;
+    };
+    let path = Path::new(target);
+    let Some(bin) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if bin == "pkexec" || !ALLOWED_BINS.contains(&bin) {
+        return false;
+    }
+    if !BIN_DIRS.iter().any(|d| Path::new(d).join(bin) == path) {
+        return false;
+    }
+    ALLOWED_COMMANDS.iter().any(|spec| spec.matches(bin, rest))
 }
 
 fn ensure_args_allowed(name: &str, args: &[&str]) -> Result<()> {
@@ -397,6 +431,24 @@ pub fn validate_host(raw: &str) -> Result<String> {
     }
 }
 
+fn prepare_command(name: &str, args: &[&str]) -> Result<Command> {
+    let bin = resolve_bin(name)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args.iter().map(OsStr::new));
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+    if name == "pkexec" {
+        for key in PKEXEC_ENV_KEEP {
+            if let Some(val) = std::env::var_os(key) {
+                cmd.env(key, val);
+            }
+        }
+    }
+    Ok(cmd)
+}
+
 pub fn resolve_bin(name: &str) -> Result<PathBuf> {
     if !ALLOWED_BINS.contains(&name) {
         return Err(CoreError::CommandNotAllowed(name.to_string()));
@@ -422,13 +474,7 @@ pub fn run_cmd(name: &str, args: &[&str]) -> Result<String> {
 
 pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<String> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    let mut cmd = prepare_command(name, args)?;
 
     let output = if timeout.as_millis() == 0 {
         cmd.output()
@@ -457,13 +503,7 @@ pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<S
 /// detectar "permission denied" vs reglas vacías vs traceroute con hops *).
 pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    let mut cmd = prepare_command(name, args)?;
 
     let output = wait_with_timeout(&mut cmd, timeout).map_err(|e| CoreError::CommandFailed {
         comando: name.to_string(),
@@ -483,13 +523,7 @@ pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<C
 /// hilo mata el proceso al vencerse el tiempo.
 pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std::process::Child> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    let mut cmd = prepare_command(name, args)?;
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = cmd.spawn().map_err(|e| CoreError::CommandFailed {
@@ -643,6 +677,10 @@ mod tests {
             Ok(_) | Err(CoreError::BinaryMissing(_))
         ));
         assert!(matches!(
+            resolve_bin("pkexec"),
+            Ok(_) | Err(CoreError::BinaryMissing(_))
+        ));
+        assert!(matches!(
             resolve_bin("bash"),
             Err(CoreError::CommandNotAllowed(_))
         ));
@@ -687,6 +725,19 @@ mod tests {
         assert!(!args_are_allowed("bash", &["-c", "id"]));
         assert!(!args_are_allowed("tracepath", &["-n", "--", "-n"]));
         assert!(ensure_args_allowed("nft", &["flush", "ruleset"]).is_err());
+        assert!(args_are_allowed(
+            "pkexec",
+            &["/usr/sbin/nft", "list", "ruleset"]
+        ));
+        assert!(!args_are_allowed(
+            "pkexec",
+            &["/usr/sbin/nft", "flush", "ruleset"]
+        ));
+        assert!(!args_are_allowed("pkexec", &["/usr/bin/bash", "-c", "id"]));
+        assert!(!args_are_allowed(
+            "pkexec",
+            &["/tmp/nft", "list", "ruleset"]
+        ));
     }
 
     #[test]

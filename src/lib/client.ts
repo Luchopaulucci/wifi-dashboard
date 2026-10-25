@@ -7,6 +7,8 @@ import type {
   HistoryRange,
   ListenersReport,
   NatReport,
+  PrivilegedAction,
+  PrivilegedReport,
   Snapshot,
   TraceEvent,
 } from "./types";
@@ -33,9 +35,10 @@ export interface DashboardClient {
   listeners(): Promise<ListenersReport>;
   dismissListener(key: string): Promise<void>;
   lookupIp(ip: string, allowExternal: boolean): Promise<GeoInfo>;
-  startTrace(destination: string): Promise<void>;
+  startTrace(destination: string, elevated?: boolean): Promise<void>;
   cancelTrace(): Promise<void>;
   onTrace(cb: (ev: TraceEvent) => void): Promise<() => void>;
+  runPrivileged(action: PrivilegedAction): Promise<PrivilegedReport>;
 }
 
 declare global {
@@ -113,6 +116,21 @@ function mockClient(): DashboardClient {
       };
       tick();
     },
+    async runPrivileged(action) {
+      if (action === "nft_list" || action === "iptables_save" || action === "iptables_list") {
+        return { kind: "firewall", data: mockFirewall(true) };
+      }
+      if (action === "conntrack_list") {
+        return { kind: "nat", data: mockNat() };
+      }
+      if (action === "ss_list") {
+        return { kind: "connections", data: mockConnections() };
+      }
+      if (action === "journal_resolved") {
+        return { kind: "boot", data: mockBootTraffic() };
+      }
+      throw new Error("La ruta se eleva con el botón del panel, no con un comando libre.");
+    },
     async cancelTrace() {
       if (traceTimer != null) window.clearTimeout(traceTimer);
       traceTimer = null;
@@ -142,7 +160,9 @@ async function tauriClient(): Promise<DashboardClient> {
     dismissListener: (key) => invoke("dismiss_listener", { key }),
     lookupIp: (ip, allowExternal) =>
       invoke<GeoInfo>("lookup_remote_ip", { ip, allowExternal }),
-    startTrace: (destination) => invoke("start_trace_route", { destination }),
+    startTrace: (destination, elevated) =>
+      invoke("start_trace_route", { destination, elevated: elevated ?? false }),
+    runPrivileged: (action) => invoke<PrivilegedReport>("run_privileged", { action }),
     cancelTrace: () => invoke("cancel_trace_route"),
     onTrace: async (cb) => {
       const un = await listen<TraceEvent>("trace-progress", (e) => cb(e.payload));

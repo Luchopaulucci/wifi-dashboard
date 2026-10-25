@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getClient } from "../../lib/client";
+import { useElevate } from "../../lib/elevate";
 import { formatBytes, formatCount } from "../../lib/format";
 import type { FirewallReport } from "../../lib/types";
 import { StatCard } from "../StatCard";
@@ -9,6 +10,7 @@ import { TabHeader } from "./ExplainButton";
 export function FirewallView() {
   const [data, setData] = useState<FirewallReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { elevate, busy: elevateBusy, error: elevateError } = useElevate("firewall", setData);
 
   const refresh = useCallback(async () => {
     try {
@@ -36,7 +38,14 @@ export function FirewallView() {
       ) : null}
       {data ? (
         <>
-          <Notes privilege={data.privilege} notes={data.notes} missing={data.missing} />
+          <Notes
+            privilege={data.privilege}
+            notes={data.notes}
+            missing={data.missing}
+            onElevate={data.privilege?.action ? () => void elevate(data.privilege!.action!) : undefined}
+            elevateBusy={elevateBusy}
+            elevateError={elevateError}
+          />
           <p className="font-ui text-xs text-slate-500">Fuente: {data.backend ?? "ninguna"}</p>
           <div className="grid gap-3 sm:grid-cols-2">
             <StatCard

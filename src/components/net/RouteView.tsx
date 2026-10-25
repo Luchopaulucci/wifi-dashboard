@@ -23,6 +23,7 @@ export function RouteView() {
   const [tool, setTool] = useState<string | null>(null);
   const [privilege, setPrivilege] = useState<PrivilegeHint | null>(null);
   const [busy, setBusy] = useState(false);
+  const [elevateError, setElevateError] = useState<string | null>(null);
   const [ispGeo, setIspGeo] = useState<GeoInfo | null>(null);
   const [geoEnabled, setGeoEnabled] = useState(false);
 
@@ -54,6 +55,7 @@ export function RouteView() {
         } else if (ev.kind === "error") {
           setBusy(false);
           setStatus(ev.message ?? "No se pudo trazar.");
+          if (ev.message) setElevateError(ev.message);
         }
       });
     })().catch(() => undefined);
@@ -82,9 +84,24 @@ export function RouteView() {
     };
   }, [hops, geoEnabled]);
 
+  const onElevate = async () => {
+    setBusy(true);
+    setElevateError(null);
+    setHops([]);
+    setStatus("Trazando con permisos…");
+    try {
+      const client = await getClient();
+      await client.startTrace(dest.trim(), true);
+    } catch (err) {
+      setBusy(false);
+      setElevateError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const onGo = async () => {
     setBusy(true);
     setPrivilege(null);
+    setElevateError(null);
     setHops([]);
     setStatus("Trazando…");
     try {
@@ -109,7 +126,14 @@ export function RouteView() {
         title="Ruta"
         hint="En Ubuntu usamos tracepath primero (UDP, sin root). Marcamos el router de casa, dónde aparece la primera IP pública (ISP) y los hops que no contestan. pmtu/asymm no son RTT."
       />
-      {privilege ? <Notes privilege={privilege} /> : null}
+      {privilege ? (
+        <Notes
+          privilege={privilege}
+          onElevate={privilege.action ? () => void onElevate() : undefined}
+          elevateBusy={busy}
+          elevateError={elevateError}
+        />
+      ) : null}
       <GeoOptIn enabled={geoEnabled} onChange={setGeoEnabled} />
       <form
         className="flex flex-wrap items-center gap-2"

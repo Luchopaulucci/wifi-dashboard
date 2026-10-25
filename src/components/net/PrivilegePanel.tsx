@@ -1,6 +1,16 @@
 import type { PrivilegeHint } from "../../lib/types";
 
-export function PrivilegePanel({ hint }: { hint: PrivilegeHint }) {
+export function PrivilegePanel({
+  hint,
+  onElevate,
+  busy = false,
+  error = null,
+}: {
+  hint: PrivilegeHint;
+  onElevate?: () => void;
+  busy?: boolean;
+  error?: string | null;
+}) {
   return (
     <aside
       role="status"
@@ -14,11 +24,29 @@ export function PrivilegePanel({ hint }: { hint: PrivilegeHint }) {
       <p className="mt-2 font-ui text-xs text-amber-200/90">
         Binario <span className="font-mono">{hint.binary}</span> · {hint.capability}
       </p>
-      <div className="mt-3 space-y-1 rounded-xl bg-black/30 p-3 font-mono text-xs text-amber-100">
-        {hint.commands.map((c) => (
-          <p key={c}>{c}</p>
-        ))}
-      </div>
+      {error ? (
+        <p role="alert" data-testid="privilege-error" className="mt-3 text-sm text-rose-200">
+          {error}
+        </p>
+      ) : null}
+      {hint.action && onElevate ? (
+        <button
+          type="button"
+          data-testid="privilege-elevate"
+          disabled={busy}
+          onClick={onElevate}
+          className="mt-3 rounded-full bg-amber-300 px-4 py-2 font-ui text-sm font-semibold text-slate-950 disabled:opacity-50"
+        >
+          {busy ? "Esperando contraseña…" : "Ver con permisos de administrador"}
+        </button>
+      ) : null}
+      {hint.commands && hint.commands.length > 0 ? (
+        <ul className="mt-3 space-y-1 font-mono text-xs text-amber-100/80">
+          {hint.commands.map((cmd) => (
+            <li key={cmd}>{cmd}</li>
+          ))}
+        </ul>
+      ) : null}
       <p className="mt-3 font-ui text-xs leading-5 text-amber-200/80">{hint.polkit_note}</p>
     </aside>
   );

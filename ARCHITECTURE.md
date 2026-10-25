@@ -13,7 +13,7 @@ crates/wifi-core/     Crate `core`: parsers, colectores, SQLite, OUI, mocks
 
 - `wifi-core` habla con herramientas de usuario (`nmcli`, `iw`, `ip`, `ping`, `ss`, `nft`, `conntrack`, `traceroute`/`tracepath`, `resolvectl`, `journalctl`) **sin shell** y con argumentos validados. Los parsers de diagnóstico viven en `crates/wifi-core/src/net/` y se testean con fixtures.
 - El historial de latencia vive en SQLite local (retención ~8 días).
-- Tauri expone esos comandos más `get_connections`, `get_nat`, `get_firewall`, `get_boot_traffic`, `get_listeners`, `lookup_remote_ip`, `start_trace_route` (eventos `trace-progress`). No hay servidor HTTP escuchando. El dev server de Vite queda en `127.0.0.1`. El lookup geo sale del proceso Rust hacia ip-api.com/RDAP (no es un servidor propio).
+- Tauri expone esos comandos más `get_connections`, `get_nat`, `get_firewall`, `get_boot_traffic`, `get_listeners`, `lookup_remote_ip`, `start_trace_route` (eventos `trace-progress`) y `run_privileged` (acciones fijas vía `pkexec`). No hay servidor HTTP escuchando. El dev server de Vite queda en `127.0.0.1`. El lookup geo sale del proceso Rust hacia ip-api.com/RDAP (no es un servidor propio).
 - Si no hay interfaz WiFi (o `WIFI_DASHBOARD_MOCK=1`), el core entrega un snapshot marcado como **modo simulado**.
 
 ## Después
@@ -29,6 +29,6 @@ crates/wifi-core/     Crate `core`: parsers, colectores, SQLite, OUI, mocks
 
 ## Invariantes
 
-- Nunca root. Si hace falta ICMP raw, documentar `cap_net_raw` sobre `ping`/`traceroute`, no `sudo`. Si hace falta listar nft/conntrack, documentar `cap_net_admin` sobre esos binarios y mostrar el panel en la UI; nunca flushear ni escribir reglas.
+- Nunca root. Si hace falta listar nft/conntrack/journal o un traceroute ICMP, la UI eleva **esa** acción con `pkexec` (polkit). Nunca `setcap`, nunca flushear ni escribir reglas, nunca lanzar Señal como root.
 - Los parsers se testean con fixtures reales (`nmcli` / `iw` / `ip neigh` / `ping` / `ss` / `conntrack` / `nft` / `iptables-save` / traceroute / `/proc/net/*` / resolvectl).
 - El barrido de LAN solo cubre la subred conectada, y como máximo una /24.

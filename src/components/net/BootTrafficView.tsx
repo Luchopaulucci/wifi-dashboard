@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getClient } from "../../lib/client";
+import { useElevate } from "../../lib/elevate";
 import { formatCount } from "../../lib/format";
 import type { BootTrafficReport } from "../../lib/types";
 import { Notes } from "./Notes";
@@ -8,6 +9,7 @@ import { TabHeader } from "./ExplainButton";
 export function BootTrafficView() {
   const [data, setData] = useState<BootTrafficReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { elevate, busy: elevateBusy, error: elevateError } = useElevate("boot", setData);
 
   const refresh = useCallback(async () => {
     try {
@@ -37,7 +39,14 @@ export function BootTrafficView() {
       ) : null}
       {data ? (
         <>
-          <Notes privilege={data.privilege} notes={data.limitations} missing={data.missing} />
+          <Notes
+            privilege={data.privilege}
+            notes={data.limitations}
+            missing={data.missing}
+            onElevate={data.privilege?.action ? () => void elevate(data.privilege!.action!) : undefined}
+            elevateBusy={elevateBusy}
+            elevateError={elevateError}
+          />
           <aside
             role="status"
             data-testid="dns-monitor-status"

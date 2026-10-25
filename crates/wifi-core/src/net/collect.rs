@@ -16,7 +16,10 @@ use super::dns::{
 };
 use super::firewall::{parse_iptables_save, parse_nft_ruleset, summarize_verdicts};
 use super::geo::RateLimiter;
-use super::privilege::{is_permission_error, is_permission_output, privilege_hint, PrivilegeHint};
+use super::privilege::{
+    capture_maybe, is_permission_error, is_permission_output, privilege_hint, ElevateError, Pkexec,
+    PrivilegeHint, PrivilegedAction,
+};
 use super::ss::{
     classify_reach, is_ephemeral_udp, listener_key, parse_ss_listeners, parse_ss_sockets,
     reach_label,
@@ -287,7 +290,10 @@ pub fn remember_dns_talker(acc: &mut HashMap<String, DnsProgramRow>, row: &Conne
     });
 }
 
-pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
+pub fn collect_connections(
+    ptr: &mut PtrCache,
+    elevate: Option<PrivilegedAction>,
+) -> ConnectionsReport {
     let mut missing = Vec::new();
     let mut sources = Vec::new();
     let mut notes = Vec::new();
@@ -295,14 +301,15 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
     let mut rows = Vec::new();
 
     if bin_exists("ss") {
-        let out = run_cmd_capture("ss", &["-H", "-tunap"], Duration::from_secs(5));
+        let ss = PrivilegedAction::SsList;
+        let out = capture_maybe(ss.bin(), ss.args(), Duration::from_secs(5), elevate);
         match out {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("ss", "CAP_NET_ADMIN"));
                 notes.push("ss respondió sin permiso; reintentamos sin -H.".into());
             }
             Ok(o) => {
-                let text = if o.stdout.trim().is_empty() {
+                let text = if o.stdout.trim().is_empty() && elevate.is_none() {
                     run_cmd_capture("ss", &["-tunap"], Duration::from_secs(5))
                         .map(|x| x.stdout)
                         .unwrap_or_default()
@@ -311,6 +318,10 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
                 };
                 rows = parse_ss_sockets(&text);
                 sources.push("ss -tunap".into());
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("ss", "CAP_NET_ADMIN"));
+                notes.push(msg);
             }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
@@ -334,7 +345,7 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
     }
 }
 
-pub fn collect_nat() -> NatReport {
+pub fn collect_nat(elevate: Option<PrivilegedAction>) -> NatReport {
     let mut missing = Vec::new();
     let mut notes = Vec::new();
     let mut privilege = None;
@@ -342,13 +353,18 @@ pub fn collect_nat() -> NatReport {
     let mut source = None;
 
     if bin_exists("conntrack") {
-        match run_cmd_capture("conntrack", &["-L"], Duration::from_secs(6)) {
+        let action = PrivilegedAction::ConntrackList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(6), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("conntrack", "CAP_NET_ADMIN"));
             }
             Ok(o) => {
                 translations = parse_conntrack(&o.stdout);
                 source = Some("conntrack -L".into());
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("conntrack", "CAP_NET_ADMIN"));
+                notes.push(msg);
             }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
@@ -401,7 +417,7 @@ pub fn collect_nat() -> NatReport {
     }
 }
 
-pub fn collect_firewall() -> FirewallReport {
+pub fn collect_firewall(elevate: Option<PrivilegedAction>) -> FirewallReport {
     let mut missing = Vec::new();
     let mut notes = Vec::new();
     let mut privilege = None;
@@ -409,13 +425,18 @@ pub fn collect_firewall() -> FirewallReport {
     let mut tables = Vec::new();
 
     if bin_exists("nft") {
-        match run_cmd_capture("nft", &["list", "ruleset"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::NftList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("nft", "CAP_NET_ADMIN"));
             }
             Ok(o) => {
                 tables = parse_nft_ruleset(&o.stdout);
                 backend = Some("nft list ruleset".into());
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("nft", "CAP_NET_ADMIN"));
+                notes.push(msg);
             }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
@@ -425,7 +446,8 @@ pub fn collect_firewall() -> FirewallReport {
     }
 
     if tables.is_empty() && bin_exists("iptables-save") {
-        match run_cmd_capture("iptables-save", &["-c"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::IptablesSave;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 if privilege.is_none() {
                     privilege = Some(privilege_hint("iptables-save", "CAP_NET_ADMIN"));
@@ -436,6 +458,12 @@ pub fn collect_firewall() -> FirewallReport {
                 backend = Some("iptables-save -c".into());
             }
             Ok(_) => {}
+            Err(CoreError::Forbidden(msg)) => {
+                if privilege.is_none() {
+                    privilege = Some(privilege_hint("iptables-save", "CAP_NET_ADMIN"));
+                }
+                notes.push(msg);
+            }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
         }
@@ -444,7 +472,8 @@ pub fn collect_firewall() -> FirewallReport {
     }
 
     if tables.is_empty() && bin_exists("iptables") {
-        match run_cmd_capture("iptables", &["-S"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::IptablesList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 if privilege.is_none() {
                     privilege = Some(privilege_hint("iptables", "CAP_NET_ADMIN"));
@@ -455,6 +484,12 @@ pub fn collect_firewall() -> FirewallReport {
                 backend = Some("iptables -S".into());
             }
             Ok(_) => {}
+            Err(CoreError::Forbidden(msg)) => {
+                if privilege.is_none() {
+                    privilege = Some(privilege_hint("iptables", "CAP_NET_ADMIN"));
+                }
+                notes.push(msg);
+            }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
         }
@@ -509,6 +544,7 @@ pub fn collect_boot_traffic(
     monitor_status: &DnsMonitorStatus,
     session_programs: &mut HashMap<String, DnsProgramRow>,
     connections: &[ConnectionRow],
+    elevate: Option<PrivilegedAction>,
 ) -> BootTrafficReport {
     let mut missing = Vec::new();
     let mut limitations = Vec::new();
@@ -588,20 +624,8 @@ pub fn collect_boot_traffic(
     }
 
     if bin_exists("journalctl") {
-        match run_cmd_capture(
-            "journalctl",
-            &[
-                "-u",
-                "systemd-resolved",
-                "-b",
-                "--no-pager",
-                "-o",
-                "cat",
-                "-n",
-                "4000",
-            ],
-            Duration::from_secs(6),
-        ) {
+        let action = PrivilegedAction::JournalResolved;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(6), elevate) {
             Ok(o)
                 if is_permission_output(&o) || o.stderr.to_ascii_lowercase().contains("d-bus") =>
             {
@@ -615,6 +639,10 @@ pub fn collect_boot_traffic(
                     );
                 }
                 domains.extend(rows);
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("journalctl", "systemd-journal"));
+                limitations.push(msg);
             }
             Err(e) => limitations.push(e.to_string()),
         }
@@ -681,6 +709,7 @@ pub fn start_trace<F>(
     destination: &str,
     gateway: Option<&str>,
     cancel: Arc<AtomicBool>,
+    elevate: bool,
     mut on_event: F,
 ) -> Result<()>
 where
@@ -744,7 +773,12 @@ where
         args.push("--".into());
         args.push(dest.clone());
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match spawn_allowed(bin, &arg_refs, Duration::from_secs(90)) {
+        let spawned = if elevate {
+            Pkexec::spawn(bin, &arg_refs).map_err(|e| CoreError::Forbidden(e.user_message()))
+        } else {
+            spawn_allowed(bin, &arg_refs, Duration::from_secs(90))
+        };
+        match spawned {
             Ok(mut child) => {
                 on_event(TraceEvent {
                     session_id: session_id.clone(),
@@ -809,9 +843,29 @@ where
                     return Ok(());
                 }
                 let status = child.wait();
+                let code = status.as_ref().ok().and_then(|s| s.code());
+                if elevate && matches!(code, Some(126) | Some(127)) {
+                    let err = if code == Some(126) {
+                        ElevateError::Cancelled
+                    } else {
+                        ElevateError::AgentMissing
+                    };
+                    on_event(TraceEvent {
+                        session_id: session_id.clone(),
+                        kind: "error".into(),
+                        hop: None,
+                        message: Some(err.user_message()),
+                        tool: Some(bin.into()),
+                        privilege: Some(privilege_hint(bin, "CAP_NET_RAW")),
+                    });
+                    return Ok(());
+                }
                 let fail_perm = status.ok().is_some_and(|s| !s.success()) && hops.is_empty();
                 if fail_perm {
                     last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
+                    if elevate {
+                        break;
+                    }
                     continue;
                 }
                 on_event(TraceEvent {
@@ -825,6 +879,17 @@ where
                 return Ok(());
             }
             Err(CoreError::BinaryMissing(b)) => last_missing.push(b),
+            Err(CoreError::Forbidden(msg)) => {
+                on_event(TraceEvent {
+                    session_id: session_id.clone(),
+                    kind: "error".into(),
+                    hop: None,
+                    message: Some(msg),
+                    tool: Some(bin.into()),
+                    privilege: Some(privilege_hint(bin, "CAP_NET_RAW")),
+                });
+                return Ok(());
+            }
             Err(e) => {
                 last_priv = if is_permission_error(&e.to_string()) {
                     Some(privilege_hint(bin, "CAP_NET_RAW"))

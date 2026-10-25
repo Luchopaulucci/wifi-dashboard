@@ -5,8 +5,17 @@ import type {
   GeoInfo,
   ListenersReport,
   NatReport,
+  PrivilegeHint,
   TraceEvent,
 } from "./types";
+
+const mockNftHint: PrivilegeHint = {
+  binary: "nft",
+  capability: "CAP_NET_ADMIN",
+  why: "Leer nft list ruleset habla con nf_tables vía netlink. Señal no corre como root.",
+  action: "nft_list",
+  polkit_note: "Un clic abre el diálogo de contraseña del sistema (pkexec).",
+};
 
 export function mockConnections(): ConnectionsReport {
   return {
@@ -134,7 +143,7 @@ export function mockNat(): NatReport {
   };
 }
 
-export function mockFirewall(): FirewallReport {
+export function mockFirewall(elevated = false): FirewallReport {
   return {
     collected_at_ms: Date.now(),
     backend: "nft list ruleset (simulado)",
@@ -143,7 +152,7 @@ export function mockFirewall(): FirewallReport {
     dropped_packets: 22,
     dropped_bytes: 1240,
     missing: [],
-    privilege: null,
+    privilege: elevated ? null : mockNftHint,
     notes: [],
     tables: [
       {
