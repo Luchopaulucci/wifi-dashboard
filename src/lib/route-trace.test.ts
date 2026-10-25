@@ -100,6 +100,52 @@ describe("applyTraceEvent", () => {
     expect(state.elevateError).toBeNull();
   });
 
+  it("un start ajeno no pisa el sessionId ya fijado y el done de B apaga busy", () => {
+    let state = beginRouteSession(emptyRouteTraceState(), "Trazando…");
+    state = bindRouteSession(state, "B");
+    expect(state.sessionId).toBe("B");
+    expect(state.busy).toBe(true);
+
+    state = applyTraceEvent(
+      state,
+      ev({ session_id: "A", kind: "start", message: "Pidiendo permisos…", tool: "traceroute" }),
+    );
+    expect(state.sessionId).toBe("B");
+    expect(state.busy).toBe(true);
+    expect(state.status).toBe("Trazando…");
+
+    state = applyTraceEvent(state, ev({ session_id: "B", kind: "done", message: "Listo con traceroute." }));
+    expect(state.sessionId).toBe("B");
+    expect(state.busy).toBe(false);
+    expect(state.status).toBe("Listo con traceroute.");
+  });
+
+  it("ningún evento cambia sessionId una vez fijado", () => {
+    let state = bindRouteSession(beginRouteSession(emptyRouteTraceState(), "Trazando…"), "B");
+
+    state = applyTraceEvent(state, ev({ session_id: "A", kind: "hop", hop }));
+    state = applyTraceEvent(state, ev({ session_id: "A", kind: "done", message: "done A" }));
+    state = applyTraceEvent(state, ev({ session_id: "A", kind: "cancelled", message: "cancel A" }));
+    state = applyTraceEvent(
+      state,
+      ev({ session_id: "A", kind: "error", message: "error A", privilege: null }),
+    );
+    expect(state.sessionId).toBe("B");
+    expect(state.busy).toBe(true);
+    expect(state.hops).toHaveLength(0);
+
+    state = applyTraceEvent(state, ev({ session_id: "B", kind: "hop", hop }));
+    expect(state.sessionId).toBe("B");
+    expect(state.hops).toHaveLength(1);
+
+    state = applyTraceEvent(
+      state,
+      ev({ session_id: "B", kind: "start", message: "traceroute -n", tool: "traceroute" }),
+    );
+    expect(state.sessionId).toBe("B");
+    expect(state.busy).toBe(true);
+  });
+
   it("una ruta sin elevar con código distinto de 0 no llena elevateError", () => {
     let state = beginRouteSession(emptyRouteTraceState(), "Trazando…");
     state = bindRouteSession(state, "s-unelev");

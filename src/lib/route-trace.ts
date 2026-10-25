@@ -40,10 +40,13 @@ export function bindRouteSession(state: RouteTraceState, sessionId: string): Rou
 }
 
 export function applyTraceEvent(state: RouteTraceState, ev: TraceEvent): RouteTraceState {
+  if (state.sessionId != null && ev.session_id !== state.sessionId) {
+    return state;
+  }
   if (ev.kind === "start") {
     return {
       ...state,
-      sessionId: ev.session_id,
+      sessionId: state.sessionId ?? ev.session_id,
       hops: [],
       status: ev.message ?? "Trazando…",
       tool: ev.tool ?? state.tool,
@@ -51,7 +54,7 @@ export function applyTraceEvent(state: RouteTraceState, ev: TraceEvent): RouteTr
       busy: true,
     };
   }
-  if (state.sessionId == null || ev.session_id !== state.sessionId) {
+  if (state.sessionId == null) {
     return state;
   }
   if (ev.kind === "hop" && ev.hop) {
