@@ -99,3 +99,13 @@ fn ping_fixture_latency() {
     assert_eq!(recv, 1);
     assert_eq!(avg, Some(18.312));
 }
+
+#[test]
+fn ping_fixture_loss_is_not_alive() {
+    let text = fixture("ping_loss.txt");
+    assert_eq!(parse_ping_latency(&text), None);
+    let (sent, recv, avg) = parse_ping_stats(&text);
+    assert_eq!(sent, 1);
+    assert_eq!(recv, 0);
+    assert_eq!(avg, None);
+}

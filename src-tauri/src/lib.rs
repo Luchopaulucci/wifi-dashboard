@@ -40,9 +40,21 @@ fn rescan_nearby(state: tauri::State<AppState>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
-fn sweep_lan(state: tauri::State<AppState>) -> Result<Snapshot, String> {
+async fn sweep_lan(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
+    let mock = {
+        let core = state.core.lock().map_err(|e| e.to_string())?;
+        core.is_mock()
+    };
+    if mock {
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        return core.sweep_lan().map_err(map_err);
+    }
+    let devices = tauri::async_runtime::spawn_blocking(wifi_core::AppCore::collect_lan_sweep)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(map_err)?;
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.sweep_lan().map_err(map_err)
+    core.snapshot_with_devices(devices).map_err(map_err)
 }
 
 #[tauri::command]

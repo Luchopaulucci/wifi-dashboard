@@ -4,9 +4,10 @@ interface Props {
   snapshot: Snapshot;
   onSweep: () => void;
   busy: boolean;
+  error?: string | null;
 }
 
-export function DevicesView({ snapshot, onSweep, busy }: Props) {
+export function DevicesView({ snapshot, onSweep, busy, error }: Props) {
   return (
     <section className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -26,6 +27,14 @@ export function DevicesView({ snapshot, onSweep, busy }: Props) {
           {busy ? "Buscando…" : "Buscar equipos en tu red"}
         </button>
       </header>
+      {error ? (
+        <p
+          data-testid="devices-error"
+          className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 font-ui text-sm text-rose-100"
+        >
+          {error}
+        </p>
+      ) : null}
       <div className="card overflow-hidden rounded-2xl">
         <table className="w-full font-ui text-sm">
           <thead className="bg-white/5 text-left text-xs uppercase tracking-wider text-slate-400">

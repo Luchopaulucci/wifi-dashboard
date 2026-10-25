@@ -131,8 +131,10 @@ export default function App() {
     try {
       const client = await getClient();
       setSnapshot(await client.sweepLan());
+      setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      setError(`No se pudo buscar equipos: ${detail}`);
     } finally {
       setBusy(false);
     }
@@ -170,7 +172,7 @@ export default function App() {
             Actualizado {relativeAgo(view.collected_at_ms, now)}
           </p>
         ) : null}
-        {error ? (
+        {error && tab !== "devices" ? (
           <p className="mb-4 rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm text-rose-100">
             {error}
           </p>
@@ -182,7 +184,12 @@ export default function App() {
         ) : null}
         {view && tab === "monitor" ? <MonitorView snapshot={view} /> : null}
         {view && tab === "devices" ? (
-          <DevicesView snapshot={view} onSweep={() => void onSweep()} busy={busy} />
+          <DevicesView
+            snapshot={view}
+            onSweep={() => void onSweep()}
+            busy={busy}
+            error={error}
+          />
         ) : null}
         {tab === "connections" ? <ConnectionsView /> : null}
         {tab === "nat" ? <NatView /> : null}
