@@ -17,7 +17,7 @@ describe("PortsView", () => {
     expect(await screen.findByText("sshd")).toBeInTheDocument();
     expect(screen.getAllByRole("row")).toHaveLength(3);
     fireEvent.click(screen.getByTestId("show-more-ports"));
-    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getAllByRole("row")).toHaveLength(5);
     expect(screen.getByText("cupsd")).toBeInTheDocument();
   });
 });
