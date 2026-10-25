@@ -424,7 +424,7 @@ pub fn collect_firewall(elevate: Option<PrivilegedAction>) -> FirewallReport {
     let mut backend = None;
     let mut tables = Vec::new();
 
-    if elevate == Some(PrivilegedAction::NftList) || bin_exists("nft") {
+    if bin_exists("nft") {
         let action = PrivilegedAction::NftList;
         match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
@@ -443,6 +443,12 @@ pub fn collect_firewall(elevate: Option<PrivilegedAction>) -> FirewallReport {
         }
     } else {
         missing.push("nft".into());
+        if elevate == Some(PrivilegedAction::NftList) {
+            notes.push(
+                "No está `nft`. En Ubuntu: sudo apt install nftables. No se pidió contraseña."
+                    .into(),
+            );
+        }
     }
 
     if tables.is_empty() && bin_exists("iptables-save") {
@@ -719,51 +725,13 @@ where
     let session_id = format!("{}-{}", now_ms(), dest);
     let ipv6 = dest.parse::<std::net::Ipv6Addr>().is_ok();
 
-    // Ubuntu default: tracepath (UDP, sin CAP_NET_RAW). traceroute después.
-    let candidates: Vec<(&str, Vec<String>)> = if ipv6 {
-        vec![
-            ("tracepath", vec!["-6".into(), "-n".into()]),
-            ("tracepath6", vec!["-n".into()]),
-            (
-                "traceroute",
-                vec![
-                    "-6".into(),
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-            (
-                "traceroute6",
-                vec![
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-        ]
-    } else {
-        vec![
-            ("tracepath", vec!["-n".into()]),
-            (
-                "traceroute",
-                vec![
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-        ]
-    };
+    // Sin elevar: tracepath (UDP) y después traceroute.
+    // Elevado: un solo pkexec de traceroute (no segundo diálogo).
+    let candidates = trace_candidates(ipv6, elevate);
 
     let mut last_priv: Option<PrivilegeHint> = None;
     let mut last_missing = Vec::new();
+    let mut last_fail: Option<TraceFail> = None;
 
     for (bin, mut args) in candidates {
         if !bin_exists(bin) {
@@ -773,7 +741,8 @@ where
         args.push("--".into());
         args.push(dest.clone());
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let spawned = if elevate {
+        let use_pkexec = elevate && is_traceroute_bin(bin);
+        let spawned = if use_pkexec {
             Pkexec::spawn(bin, &arg_refs).map_err(|e| CoreError::Forbidden(e.user_message()))
         } else {
             spawn_allowed(bin, &arg_refs, Duration::from_secs(90))
@@ -789,14 +758,13 @@ where
                     privilege: None,
                 });
                 let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-                if let Some(err) = stderr {
+                let stderr_jh = child.stderr.take().map(|mut err| {
                     std::thread::spawn(move || {
                         let mut buf = Vec::new();
-                        let mut err = err;
                         let _ = err.read_to_end(&mut buf);
-                    });
-                }
+                        String::from_utf8_lossy(&buf).into_owned()
+                    })
+                });
                 let mut hops: Vec<TraceHop> = Vec::new();
                 if let Some(out) = stdout {
                     let reader = BufReader::new(out);
@@ -830,8 +798,9 @@ where
                     }
                 }
                 if cancel.load(Ordering::Relaxed) {
-                    reap_or_detach(child, true);
-                    let msg = if elevate {
+                    let _ = reap_child(child, true);
+                    let _ = stderr_jh.and_then(|h| h.join().ok());
+                    let msg = if use_pkexec {
                         format!("Ruta cancelada. {}", ElevateError::CANNOT_SIGNAL)
                     } else {
                         "Ruta cancelada.".into()
@@ -846,9 +815,10 @@ where
                     });
                     return Ok(());
                 }
-                let status = reap_or_detach(child, false);
+                let status = reap_child(child, false);
                 let code = status.as_ref().and_then(|s| s.code());
-                if elevate && matches!(code, Some(126) | Some(127)) {
+                let stderr_text = stderr_jh.and_then(|h| h.join().ok()).unwrap_or_default();
+                if use_pkexec && matches!(code, Some(126) | Some(127)) {
                     let err = if code == Some(126) {
                         ElevateError::Cancelled
                     } else {
@@ -864,7 +834,7 @@ where
                     });
                     return Ok(());
                 }
-                if elevate
+                if use_pkexec
                     && matches!(code, Some(c) if c != 0 && c != 126 && c != 127)
                     && !hops.is_empty()
                 {
@@ -874,15 +844,20 @@ where
                         hop: None,
                         message: Some(ElevateError::failed_message(
                             code,
-                            &format!("Listo con {bin} (salida parcial)."),
+                            &format!("Listo con {bin} (salida parcial). {}", stderr_text.trim()),
                         )),
                         tool: Some(bin.into()),
                         privilege: None,
                     });
                     return Ok(());
                 }
-                // Sin hops: probar el siguiente (pkexec traceroute si tracepath no dio nada).
+                // Sin hops: siguiente candidato sin un segundo pkexec.
                 if trace_try_next_candidate(hops.len()) {
+                    last_fail = Some(TraceFail {
+                        bin: bin.to_string(),
+                        code,
+                        stderr: stderr_text,
+                    });
                     if status.is_some_and(|s| !s.success()) {
                         last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
                     }
@@ -925,16 +900,11 @@ where
             session_id,
             kind: "error".into(),
             hop: None,
-            message: Some(
-                if last_missing.len() == 4 || (!last_missing.is_empty() && last_priv.is_none()) {
-                    format!(
-                    "No está traceroute ni tracepath. En Ubuntu: sudo apt install traceroute iputils-tracepath. Faltan: {}",
-                    last_missing.join(", ")
-                )
-                } else {
-                    "No se pudo trazar la ruta con los binarios disponibles.".into()
-                },
-            ),
+            message: Some(trace_exhausted_message(
+                &last_missing,
+                last_priv.is_some(),
+                last_fail.as_ref(),
+            )),
             tool: None,
             privilege: last_priv,
         });
@@ -942,15 +912,82 @@ where
     Ok(())
 }
 
-/// Sin hops hay que probar el siguiente binario. En elevado, un `tracepath`
-/// vacío no corta el fallback a `pkexec traceroute -n -q 1 -w 2 -- dest`.
+fn is_traceroute_bin(bin: &str) -> bool {
+    matches!(bin, "traceroute" | "traceroute6")
+}
+
+fn traceroute_flags(ipv6: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if ipv6 {
+        args.push("-6".into());
+    }
+    args.extend([
+        "-n".into(),
+        "-q".into(),
+        "1".into(),
+        "-w".into(),
+        "2".into(),
+    ]);
+    args
+}
+
+fn trace_candidates(ipv6: bool, elevate: bool) -> Vec<(&'static str, Vec<String>)> {
+    if elevate {
+        if ipv6 && !bin_exists("traceroute") && bin_exists("traceroute6") {
+            return vec![("traceroute6", traceroute_flags(false))];
+        }
+        return vec![("traceroute", traceroute_flags(ipv6))];
+    }
+    if ipv6 {
+        vec![
+            ("tracepath", vec!["-6".into(), "-n".into()]),
+            ("tracepath6", vec!["-n".into()]),
+            ("traceroute", traceroute_flags(true)),
+            ("traceroute6", traceroute_flags(false)),
+        ]
+    } else {
+        vec![
+            ("tracepath", vec!["-n".into()]),
+            ("traceroute", traceroute_flags(false)),
+        ]
+    }
+}
+
+struct TraceFail {
+    bin: String,
+    code: Option<i32>,
+    stderr: String,
+}
+
+fn trace_exhausted_message(
+    last_missing: &[String],
+    had_priv: bool,
+    last_fail: Option<&TraceFail>,
+) -> String {
+    if let Some(fail) = last_fail {
+        return ElevateError::failed_message(
+            fail.code,
+            &format!("{} no dio hops. {}", fail.bin, fail.stderr.trim()),
+        );
+    }
+    if last_missing.len() == 4 || (!last_missing.is_empty() && !had_priv) {
+        format!(
+            "No está traceroute ni tracepath. En Ubuntu: sudo apt install traceroute iputils-tracepath. Faltan: {}",
+            last_missing.join(", ")
+        )
+    } else {
+        "No se pudo trazar la ruta con los binarios disponibles.".into()
+    }
+}
+
+/// Sin hops hay que probar el siguiente binario (sin un segundo pkexec).
 fn trace_try_next_candidate(hops: usize) -> bool {
     hops == 0
 }
 
-/// Espera al wrapper (`pkexec` o el binario). Si no muere, no colgamos:
-/// el hijo root de pkexec no recibe nuestra señal.
-fn reap_or_detach(mut child: std::process::Child, kill: bool) -> Option<std::process::ExitStatus> {
+/// Espera al wrapper (`pkexec` o el binario). Si no reaparece, el `Child`
+/// se mueve a un hilo que hace `wait` (Drop no bloquea este hilo).
+fn reap_child(mut child: std::process::Child, kill: bool) -> Option<std::process::ExitStatus> {
     if kill {
         let _ = child.kill();
     }
@@ -966,8 +1003,9 @@ fn reap_or_detach(mut child: std::process::Child, kill: bool) -> Option<std::pro
     match child.try_wait() {
         Ok(Some(status)) => Some(status),
         _ => {
-            // Evita que Drop de Child bloquee el hilo si el wait no avanza.
-            std::mem::forget(child);
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             None
         }
     }
@@ -1326,23 +1364,74 @@ mod tests {
     }
 
     #[test]
-    fn collect_firewall_nft_list_invokes_pkexec() {
-        let _ = crate::net::privilege::take_pkexec_captures();
-        let report = collect_firewall(Some(PrivilegedAction::NftList));
-        let captures = crate::net::privilege::take_pkexec_captures();
-        assert!(
-            captures.contains(&PrivilegedAction::NftList),
-            "collect_firewall(Some(NftList)) debe llamar Pkexec::capture; notes={:?} missing={:?} captures={captures:?}",
-            report.notes,
-            report.missing
+    fn elevated_candidates_are_one_traceroute() {
+        let v4 = trace_candidates(false, true);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].0, "traceroute");
+        assert_eq!(v4[0].1, vec!["-n", "-q", "1", "-w", "2"]);
+        let v6 = trace_candidates(true, true);
+        assert_eq!(v6.len(), 1);
+        assert!(v6[0].0 == "traceroute" || v6[0].0 == "traceroute6");
+    }
+
+    #[test]
+    fn traceroute_exhausted_shows_code_and_stderr() {
+        let msg = trace_exhausted_message(
+            &[],
+            false,
+            Some(&TraceFail {
+                bin: "traceroute".into(),
+                code: Some(1),
+                stderr: "send: Operation not permitted".into(),
+            }),
         );
-        let blob = format!("{:?} {:?}", report.notes, report.privilege);
+        assert!(msg.contains("código 1"), "{msg}");
+        assert!(msg.contains("send: Operation not permitted"), "{msg}");
+        assert!(msg.contains("traceroute"), "{msg}");
+    }
+
+    #[test]
+    fn collect_firewall_nft_list_invokes_pkexec() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("nft", "/usr/sbin/nft");
+        crate::command::test_runner::set_capture_ok(
+            "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t}\n}\n",
+        );
+        let report = collect_firewall(Some(PrivilegedAction::NftList));
+        assert_eq!(
+            crate::command::test_runner::take_argv(),
+            vec![vec![
+                "/usr/bin/pkexec".to_string(),
+                "/usr/sbin/nft".to_string(),
+                "list".to_string(),
+                "ruleset".to_string(),
+            ]],
+            "argv de pkexec nft (backend={:?} notes={:?})",
+            report.backend,
+            report.notes
+        );
+        assert_eq!(report.backend.as_deref(), Some("nft list ruleset"));
+    }
+
+    #[test]
+    fn collect_firewall_missing_nft_does_not_elevate() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::hide_bin("nft");
+        let report = collect_firewall(Some(PrivilegedAction::NftList));
         assert!(
-            blob.contains("pkexec")
-                || blob.contains("El comando elevado")
-                || blob.contains("No está")
-                || report.privilege.is_some(),
-            "tiene que quedar rastro de la elevación: {blob}"
+            crate::command::test_runner::take_argv().is_empty(),
+            "sin nft no se debe invocar pkexec"
+        );
+        assert!(report.missing.iter().any(|m| m == "nft"));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("No está `nft`") && n.contains("No se pidió contraseña")),
+            "{:?}",
+            report.notes
         );
     }
 }

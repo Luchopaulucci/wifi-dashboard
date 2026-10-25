@@ -155,22 +155,6 @@ impl ElevateError {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static PKEXEC_CAPTURES: std::cell::RefCell<Vec<PrivilegedAction>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(test)]
-fn record_pkexec_capture(action: PrivilegedAction) {
-    PKEXEC_CAPTURES.with(|c| c.borrow_mut().push(action));
-}
-
-#[cfg(test)]
-pub(crate) fn take_pkexec_captures() -> Vec<PrivilegedAction> {
-    PKEXEC_CAPTURES.with(|c| std::mem::take(&mut *c.borrow_mut()))
-}
-
 /// Elevación vía el camino existente (`resolve_bin` + `run_cmd_capture` / `spawn_allowed`).
 pub struct Pkexec;
 
@@ -183,8 +167,6 @@ impl Pkexec {
     }
 
     pub fn capture(action: PrivilegedAction) -> std::result::Result<CmdOutput, ElevateError> {
-        #[cfg(test)]
-        record_pkexec_capture(action);
         let argv = Self::prepare_argv(action.bin(), action.args())?;
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         match run_cmd_capture("pkexec", &refs, action.timeout()) {
@@ -306,7 +288,7 @@ pub fn privilege_hint(binary: &str, capability: &str) -> PrivilegeHint {
             format!(
                 "`{binary}` con ICMP suele necesitar CAP_NET_RAW (como ping). En Ubuntu el default es `tracepath` (UDP) y casi siempre anda sin root: Señal lo intenta primero."
             ),
-            "Un clic abre el diálogo de contraseña del sistema (pkexec) y relanza traceroute. Si el UDP de tracepath no da hops, se prueba `traceroute -n -q 1 -w 2`. Cancelar o el timeout no matan el traceroute elevado: corre como root hasta que termina.",
+            "Un clic abre el diálogo de contraseña una sola vez y corre `traceroute -n -q 1 -w 2`. No se relanza pkexec (ni otro diálogo) si no hay hops. Cancelar o el timeout no matan el traceroute elevado: corre como root hasta que termina.",
         ),
         "tracepath" | "tracepath6" => PrivilegeHint::new(
             binary,
