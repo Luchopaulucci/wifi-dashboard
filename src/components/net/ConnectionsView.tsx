@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getClient } from "../../lib/client";
 import type { ConnectionRow, ConnectionsReport, GeoInfo } from "../../lib/types";
+import { GeoOptIn } from "./GeoOptIn";
 import { Notes } from "./Notes";
 import { TabHeader } from "./ExplainButton";
 
@@ -31,6 +32,7 @@ export function ConnectionsView() {
   const [geo, setGeo] = useState<GeoInfo | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
+  const [geoEnabled, setGeoEnabled] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -68,10 +70,16 @@ export function ConnectionsView() {
       );
       return;
     }
+    if (!geoEnabled) {
+      setGeoError(
+        "Las consultas externas están apagadas. Si las prendés, se envía solo esta IP pública por HTTPS a rdap.org (país/organización del bloque). No se envía tu nombre ni IPs de la LAN.",
+      );
+      return;
+    }
     setGeoBusy(true);
     try {
       const client = await getClient();
-      setGeo(await client.lookupIp(row.remote_ip));
+      setGeo(await client.lookupIp(row.remote_ip, true));
     } catch (err) {
       setGeoError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -84,7 +92,7 @@ export function ConnectionsView() {
       <TabHeader
         tab="connections"
         title="Conexiones activas"
-        hint="Sockets de `ss -tunap`: proceso, IP y dominio destino, puerto, protocolo y estado. Solo lectura. El dominio sale de PTR o de DNS observado; el país/ASN es una consulta externa al hacer clic."
+        hint="Sockets de `ss -tunap`: proceso, IP y dominio destino, puerto, protocolo y estado. Solo lectura. El dominio sale de PTR o de DNS observado; el país/ASN es una consulta HTTPS opt-in (apagada por defecto)."
         extra={
           <label className="flex items-center gap-2 font-ui text-sm text-slate-300">
             <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} />
@@ -98,6 +106,7 @@ export function ConnectionsView() {
       {data ? (
         <Notes privilege={data.privilege} notes={data.notes} missing={data.missing} />
       ) : null}
+      <GeoOptIn enabled={geoEnabled} onChange={setGeoEnabled} />
       <div className="flex flex-wrap items-center gap-3">
         <input
           type="search"
@@ -167,7 +176,7 @@ export function ConnectionsView() {
           <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Detalle</p>
           {!selected ? (
             <p className="mt-3 font-ui text-sm text-slate-400">
-              Clic en una fila para país, empresa y ASN. Es una consulta externa, cacheada.
+              Clic en una fila para país, empresa y ASN. Hace falta prender el switch de consultas HTTPS (RDAP).
             </p>
           ) : (
             <div className="mt-3 space-y-2 font-ui text-sm">

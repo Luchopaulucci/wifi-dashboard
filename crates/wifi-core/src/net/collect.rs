@@ -15,18 +15,21 @@ use super::dns::{
     parse_resolvectl_monitor_line, parse_resolvectl_statistics,
 };
 use super::firewall::{parse_iptables_save, parse_nft_ruleset, summarize_verdicts};
-use super::geo::{lookup_ip_external, RateLimiter};
+use super::geo::RateLimiter;
 use super::privilege::{is_permission_error, is_permission_output, privilege_hint, PrivilegeHint};
-use super::ss::{classify_reach, listener_key, parse_ss_listeners, parse_ss_sockets, reach_label};
+use super::ss::{
+    classify_reach, is_ephemeral_udp, listener_key, parse_ss_listeners, parse_ss_sockets,
+    reach_label,
+};
 use super::stats::{
     iface_counters, parse_proc_net_dev, parse_proc_net_netstat, parse_proc_net_snmp, snmp_counters,
 };
 use super::talkers::classify_talker;
 use super::trace::{classify_hops as classify_hop_kinds, parse_trace_line};
 use super::types::{
-    BootTrafficReport, ConnectionRow, ConnectionsReport, DnsDomainRow, DnsProgramRow,
-    FirewallReport, GeoInfo, ListenerRow, ListenersReport, NatReport, TraceEvent, TraceHop,
-    TrafficCounter,
+    BootTrafficReport, ConnectionRow, ConnectionsReport, DnsDomainRow, DnsMonitorStatus,
+    DnsProgramRow, FirewallReport, GeoInfo, ListenerRow, ListenersReport, NatReport, TraceEvent,
+    TraceHop, TrafficCounter,
 };
 
 #[derive(Debug, Default)]
@@ -84,20 +87,97 @@ pub struct GeoCache {
 }
 
 impl GeoCache {
-    pub fn limiter(&mut self) -> &mut RateLimiter {
+    fn limiter(&mut self) -> &mut RateLimiter {
         self.limiter
             .get_or_insert_with(|| RateLimiter::new(Duration::from_millis(1500)))
     }
 
-    pub fn get_or_lookup(&mut self, ip: &str) -> Result<GeoInfo> {
-        if let Some(hit) = self.map.get(ip) {
-            return Ok(hit.clone());
-        }
-        self.limiter().wait_if_needed();
-        let info = lookup_ip_external(ip)?;
-        self.map.insert(ip.to_string(), info.clone());
-        Ok(info)
+    pub fn get(&self, ip: &str) -> Option<GeoInfo> {
+        self.map.get(ip).cloned()
     }
+
+    pub fn insert(&mut self, ip: String, info: GeoInfo) {
+        self.map.insert(ip, info);
+    }
+
+    /// No duerme: el caller duerme fuera del lock del mapa.
+    pub fn take_rate_delay(&mut self) -> Duration {
+        self.limiter().delay_until_ready()
+    }
+
+    pub fn mark_rate(&mut self) {
+        self.limiter().mark();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ListenerSession {
+    baseline: Option<HashSet<String>>,
+    dismissed: HashSet<String>,
+    alerts: HashMap<String, ListenerRow>,
+}
+
+impl ListenerSession {
+    pub fn dismiss(&mut self, key: &str) {
+        self.dismissed.insert(key.to_string());
+        self.alerts.remove(key);
+    }
+}
+
+pub fn apply_listener_session(
+    session: &mut ListenerSession,
+    mut rows: Vec<ListenerRow>,
+) -> (Vec<ListenerRow>, Vec<String>) {
+    rows.retain(|r| !is_ephemeral_udp(r));
+    for row in rows.iter_mut() {
+        row.key = listener_key(row);
+        row.reach = classify_reach(&row.local_ip);
+        row.reach_label = reach_label(row.reach);
+        row.is_new = false;
+    }
+    let mut notes = Vec::new();
+    if session.baseline.is_none() {
+        session.baseline = Some(rows.iter().map(|r| r.key.clone()).collect());
+        notes.push(
+            "Foto inicial de esta sesión: de acá en más avisamos si aparece un listener que no estaba (mismo proto+puerto+proceso). La alerta queda hasta que la descartes. UDP efímero (≥32768, clientes) se ignora. Reiniciar Señal toma una foto nueva.".into(),
+        );
+        return (rows, notes);
+    }
+    let baseline = session.baseline.as_ref().expect("baseline set");
+    for row in &rows {
+        if !baseline.contains(&row.key) && !session.dismissed.contains(&row.key) {
+            session.alerts.entry(row.key.clone()).or_insert_with(|| {
+                let mut alert = row.clone();
+                alert.is_new = true;
+                alert
+            });
+        }
+    }
+    for row in rows.iter_mut() {
+        if session.alerts.contains_key(&row.key) {
+            row.is_new = true;
+        }
+    }
+    (rows, notes)
+}
+
+pub fn remember_dns_talker(acc: &mut HashMap<String, DnsProgramRow>, row: &ConnectionRow) {
+    let dns_port = row.remote_port == "53" || row.remote_port == "853" || row.local_port == "53";
+    if !dns_port {
+        return;
+    }
+    let process = row
+        .process
+        .clone()
+        .unwrap_or_else(|| "(desconocido)".into());
+    let key = format!("{}|{}", process, row.pid.unwrap_or(0));
+    acc.entry(key).or_insert(DnsProgramRow {
+        process,
+        pid: row.pid,
+        dns_server: Some(row.remote_ip.clone()),
+        proto: row.protocol.clone(),
+        note: "Acumulado en esta sesión: este proceso tuvo un socket hacia :53/:853. No es el historial del kernel desde el boot ni los dominios que preguntó (Linux no lo guarda sin un sniffer, y eso pide root/CAP_NET_RAW).".into(),
+    });
 }
 
 pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
@@ -342,7 +422,7 @@ pub fn collect_firewall() -> FirewallReport {
     }
 }
 
-pub fn collect_listeners(prev: Option<&HashSet<String>>) -> ListenersReport {
+pub fn collect_listeners(session: &mut ListenerSession) -> ListenersReport {
     let mut missing = Vec::new();
     let mut notes = Vec::new();
     let mut rows = Vec::new();
@@ -374,39 +454,15 @@ pub fn collect_listeners(prev: Option<&HashSet<String>>) -> ListenersReport {
         notes.push("Falta `ss` (iproute2).".into());
     }
 
-    let mut new_count = 0u64;
-    if let Some(prev) = prev {
-        for row in rows.iter_mut() {
-            let key = listener_key(row);
-            if !prev.contains(&key) {
-                row.is_new = true;
-                new_count += 1;
-            }
-        }
-        if prev.is_empty() {
-            for row in rows.iter_mut() {
-                row.is_new = false;
-            }
-            new_count = 0;
-            notes.push(
-                "Primera foto de puertos: a partir de ahora avisamos si aparece uno nuevo.".into(),
-            );
-        }
-    } else {
-        notes.push(
-            "Primera foto de puertos: a partir de ahora avisamos si aparece uno nuevo.".into(),
-        );
-    }
-
-    // Re-label reach
-    for row in rows.iter_mut() {
-        row.reach = classify_reach(&row.local_ip);
-        row.reach_label = reach_label(row.reach);
-    }
+    let (rows, extra_notes) = apply_listener_session(session, rows);
+    notes.extend(extra_notes);
+    let alerts: Vec<ListenerRow> = session.alerts.values().cloned().collect();
+    let new_count = alerts.len() as u64;
 
     ListenersReport {
         collected_at_ms: now_ms(),
         rows,
+        alerts,
         new_count,
         source,
         missing,
@@ -419,7 +475,10 @@ pub fn listener_keys(rows: &[ListenerRow]) -> HashSet<String> {
 }
 
 pub fn collect_boot_traffic(
+    ptr: &mut PtrCache,
     monitor_domains: &[DnsDomainRow],
+    monitor_status: &DnsMonitorStatus,
+    session_programs: &mut HashMap<String, DnsProgramRow>,
     connections: &[ConnectionRow],
 ) -> BootTrafficReport {
     let mut missing = Vec::new();
@@ -427,7 +486,6 @@ pub fn collect_boot_traffic(
     let mut privilege = None;
     let mut counters = Vec::new();
     let mut domains = Vec::new();
-    let mut programs = Vec::new();
 
     if let Ok(text) = std::fs::read_to_string("/proc/net/snmp") {
         let snmp = parse_proc_net_snmp(&text);
@@ -487,7 +545,8 @@ pub fn collect_boot_traffic(
                 );
             }
             Ok(o) if !o.stdout.trim().is_empty() => {
-                let (rows, _map) = parse_resolvectl_cache(&o.stdout);
+                let (rows, map) = parse_resolvectl_cache(&o.stdout);
+                ptr.remember_dns_map(map);
                 domains.extend(rows);
             }
             _ => {}
@@ -510,7 +569,7 @@ pub fn collect_boot_traffic(
                 "-o",
                 "cat",
                 "-n",
-                "400",
+                "4000",
             ],
             Duration::from_secs(6),
         ) {
@@ -537,26 +596,25 @@ pub fn collect_boot_traffic(
     domains.extend(monitor_domains.iter().cloned());
     domains = merge_domain_rows(domains);
 
-    // Procesos que ahora mismo hablan con DNS (puerto 53/853).
+    // Historial de programas que hablaron con DNS en ESTA sesión (no solo el poll actual).
     for row in connections {
-        let dns_port =
-            row.remote_port == "53" || row.remote_port == "853" || row.local_port == "53";
-        if dns_port {
-            programs.push(DnsProgramRow {
-                process: row.process.clone().unwrap_or_else(|| "(desconocido)".into()),
-                pid: row.pid,
-                dns_server: Some(row.remote_ip.clone()),
-                proto: row.protocol.clone(),
-                note: "Socket abierto ahora hacia un puerto DNS. No es el historial desde el arranque ni el listado de dominios que preguntó.".into(),
-            });
+        remember_dns_talker(session_programs, row);
+    }
+    let mut programs: Vec<_> = session_programs.values().cloned().collect();
+    programs.sort_by(|a, b| a.process.cmp(&b.process));
+
+    if !monitor_status.running {
+        limitations.push(monitor_status.explanation.clone());
+        if let Some(err) = &monitor_status.error {
+            limitations.push(format!("resolvectl monitor: {err}"));
         }
     }
 
     limitations.push(
-        "Linux no guarda 'dominio X lo preguntó el proceso Y desde el boot' sin un sniffer (tcpdump) o auditd, y eso pide CAP_NET_RAW/root. Señal no captura tráfico. Los dominios salen de resolved (stats/caché/monitor mientras la app está abierta) y, si hay permiso, del journal.".into(),
+        "Linux no guarda 'dominio X lo preguntó el proceso Y desde el boot' sin un sniffer (tcpdump) o auditd, y eso pide CAP_NET_RAW/root. Señal no captura tráfico. Los dominios desde el boot salen del journal (si tu usuario puede leerlo) y de la caché de resolved. Los programas son el historial de sockets :53/:853 visto en esta sesión.".into(),
     );
     limitations.push(
-        "Los contadores de /proc/net/* son desde que arrancó el kernel. Los de systemd-resolved, desde que arrancó resolved. Los del monitor, desde que abriste Señal.".into(),
+        "Los contadores de /proc/net/* son desde que arrancó el kernel. Los de systemd-resolved, desde que arrancó resolved. Los del monitor, desde que abriste Señal (y solo si el monitor arrancó).".into(),
     );
 
     for d in domains.iter_mut() {
@@ -573,6 +631,7 @@ pub fn collect_boot_traffic(
         missing,
         privilege,
         limitations,
+        dns_monitor: monitor_status.clone(),
     }
 }
 
@@ -602,8 +661,11 @@ where
     let session_id = format!("{}-{}", now_ms(), dest);
     let ipv6 = dest.parse::<std::net::Ipv6Addr>().is_ok();
 
+    // Ubuntu default: tracepath (UDP, sin CAP_NET_RAW). traceroute después.
     let candidates: Vec<(&str, Vec<String>)> = if ipv6 {
         vec![
+            ("tracepath", vec!["-6".into(), "-n".into()]),
+            ("tracepath6", vec!["-n".into()]),
             (
                 "traceroute",
                 vec![
@@ -625,11 +687,10 @@ where
                     "2".into(),
                 ],
             ),
-            ("tracepath", vec!["-6".into(), "-n".into()]),
-            ("tracepath6", vec!["-n".into()]),
         ]
     } else {
         vec![
+            ("tracepath", vec!["-n".into()]),
             (
                 "traceroute",
                 vec![
@@ -640,7 +701,6 @@ where
                     "2".into(),
                 ],
             ),
-            ("tracepath", vec!["-n".into()]),
         ]
     };
 
@@ -655,7 +715,7 @@ where
         args.push("--".into());
         args.push(dest.clone());
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match spawn_allowed(bin, &arg_refs) {
+        match spawn_allowed(bin, &arg_refs, Duration::from_secs(90)) {
             Ok(mut child) => {
                 on_event(TraceEvent {
                     session_id: session_id.clone(),
@@ -776,29 +836,85 @@ pub fn default_gateway() -> Option<String> {
     crate::parse::parse_ip_route_default(&out.stdout).map(|(gw, _dev)| gw)
 }
 
-/// `resolvectl monitor` en background. No falla el arranque si no está o no hay permiso.
-pub fn spawn_dns_monitor(acc: Arc<Mutex<HashMap<String, u64>>>, cancel: Arc<AtomicBool>) {
+fn set_monitor_status(slot: &Mutex<DnsMonitorStatus>, status: DnsMonitorStatus) {
+    if let Ok(mut g) = slot.lock() {
+        *g = status;
+    }
+}
+
+/// `resolvectl monitor` en background. Si falla sin root, lo dejamos escrito en `status`.
+pub fn spawn_dns_monitor(
+    acc: Arc<Mutex<HashMap<String, u64>>>,
+    status: Arc<Mutex<DnsMonitorStatus>>,
+    cancel: Arc<AtomicBool>,
+) {
     if !bin_exists("resolvectl") {
+        set_monitor_status(
+            &status,
+            DnsMonitorStatus {
+                running: false,
+                error: Some("no está el binario resolvectl".into()),
+                needs_privilege: false,
+                explanation: "No está systemd-resolved (`resolvectl`). Sin eso no hay monitor DNS en vivo. Señal no lo instala.".into(),
+            },
+        );
         return;
     }
     std::thread::Builder::new()
         .name("senal-dns-monitor".into())
         .spawn(move || {
-            let mut child = match spawn_allowed("resolvectl", &["monitor"]) {
+            let mut child = match spawn_allowed("resolvectl", &["monitor"], Duration::ZERO) {
                 Ok(c) => c,
-                Err(_) => return,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let needs = is_permission_error(&msg);
+                    set_monitor_status(
+                        &status,
+                        DnsMonitorStatus {
+                            running: false,
+                            error: Some(msg),
+                            needs_privilege: needs,
+                            explanation: if needs {
+                                "resolvectl monitor falló sin privilegios. Señal no corre como root y no lo relanza con sudo. Igual acumulamos los programas que vimos hablando con :53/:853 en esta sesión y, si tu usuario lee el journal, los dominios desde el boot.".into()
+                            } else {
+                                "No se pudo arrancar resolvectl monitor. Los dominios en vivo de esta sesión no van a aparecer por esa vía.".into()
+                            },
+                        },
+                    );
+                    return;
+                }
             };
             let stdout = match child.stdout.take() {
                 Some(s) => s,
-                None => return,
+                None => {
+                    set_monitor_status(
+                        &status,
+                        DnsMonitorStatus {
+                            running: false,
+                            error: Some("sin stdout".into()),
+                            needs_privilege: false,
+                            explanation: "resolvectl monitor no entregó stdout.".into(),
+                        },
+                    );
+                    return;
+                }
             };
-            if let Some(err) = child.stderr.take() {
+            let stderr_handle = child.stderr.take().map(|mut err| {
                 std::thread::spawn(move || {
                     let mut buf = Vec::new();
-                    let mut err = err;
                     let _ = err.read_to_end(&mut buf);
-                });
-            }
+                    String::from_utf8_lossy(&buf).into_owned()
+                })
+            });
+            set_monitor_status(
+                &status,
+                DnsMonitorStatus {
+                    running: true,
+                    error: None,
+                    needs_privilege: false,
+                    explanation: "resolvectl monitor está corriendo: las consultas DNS nuevas mientras Señal está abierta se acumulan acá.".into(),
+                },
+            );
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if cancel.load(Ordering::Relaxed) {
@@ -810,7 +926,41 @@ pub fn spawn_dns_monitor(acc: Arc<Mutex<HashMap<String, u64>>>, cancel: Arc<Atom
                     ingest_monitor_line(&line, &mut map);
                 }
             }
-            let _ = child.wait();
+            let wait = child.wait();
+            let stderr = stderr_handle
+                .and_then(|h| h.join().ok())
+                .unwrap_or_default();
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let failed = wait.map(|s| !s.success()).unwrap_or(true);
+            if failed || !stderr.trim().is_empty() {
+                let needs = is_permission_error(&stderr);
+                set_monitor_status(
+                    &status,
+                    DnsMonitorStatus {
+                        running: false,
+                        error: Some(if stderr.trim().is_empty() {
+                            "resolvectl monitor salió".into()
+                        } else {
+                            stderr.trim().to_string()
+                        }),
+                        needs_privilege: needs,
+                        explanation: if needs {
+                            "resolvectl monitor falló sin privilegios. Señal no corre como root. No hay DNS en vivo por el monitor; sí hay historial de esta sesión (sockets :53/:853) y, si hay permiso, el journal desde el boot.".into()
+                        } else {
+                            format!(
+                                "resolvectl monitor se detuvo. {}",
+                                if stderr.trim().is_empty() {
+                                    "Sin más detalle.".to_string()
+                                } else {
+                                    stderr.trim().to_string()
+                                }
+                            )
+                        },
+                    },
+                );
+            }
         })
         .ok();
 }
@@ -833,4 +983,112 @@ pub fn monitor_rows(acc: &HashMap<String, u64>) -> Vec<DnsDomainRow> {
         .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.count));
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::types::Reachability;
+
+    fn row(proto: &str, ip: &str, port: &str, process: &str) -> ListenerRow {
+        let mut r = ListenerRow {
+            protocol: proto.into(),
+            local_ip: ip.into(),
+            local_port: port.into(),
+            process: Some(process.into()),
+            pid: Some(1),
+            reach: Reachability::LocalOnly,
+            reach_label: String::new(),
+            key: String::new(),
+            is_new: false,
+        };
+        r.key = listener_key(&r);
+        r
+    }
+
+    #[test]
+    fn baseline_once_then_alert_until_dismiss() {
+        let mut session = ListenerSession::default();
+        let first = vec![row("tcp", "0.0.0.0", "22", "sshd")];
+        let (rows, notes) = apply_listener_session(&mut session, first);
+        assert!(!rows[0].is_new);
+        assert!(session.alerts.is_empty());
+        assert!(notes.iter().any(|n| n.contains("Foto inicial")));
+
+        let second = vec![
+            row("tcp", "0.0.0.0", "22", "sshd"),
+            row("tcp", "127.0.0.1", "8080", "python3"),
+        ];
+        let (rows, _) = apply_listener_session(&mut session, second);
+        assert_eq!(session.alerts.len(), 1);
+        assert!(rows.iter().any(|r| r.local_port == "8080" && r.is_new));
+
+        // Reopen after closing: still the same alert, no duplicate.
+        let only_ssh = vec![row("tcp", "0.0.0.0", "22", "sshd")];
+        let _ = apply_listener_session(&mut session, only_ssh);
+        assert_eq!(session.alerts.len(), 1);
+        let again = vec![
+            row("tcp", "0.0.0.0", "22", "sshd"),
+            row("tcp", "127.0.0.1", "8080", "python3"),
+        ];
+        let _ = apply_listener_session(&mut session, again);
+        assert_eq!(session.alerts.len(), 1);
+
+        session.dismiss(&row("tcp", "127.0.0.1", "8080", "python3").key);
+        assert!(session.alerts.is_empty());
+        let after = vec![
+            row("tcp", "0.0.0.0", "22", "sshd"),
+            row("tcp", "127.0.0.1", "8080", "python3"),
+        ];
+        let (rows, _) = apply_listener_session(&mut session, after);
+        assert!(session.alerts.is_empty());
+        assert!(rows.iter().all(|r| !r.is_new));
+    }
+
+    #[test]
+    fn skips_ephemeral_udp() {
+        let mut session = ListenerSession::default();
+        let _ = apply_listener_session(&mut session, vec![row("udp", "0.0.0.0", "53", "resolved")]);
+        let with_client = vec![
+            row("udp", "0.0.0.0", "53", "resolved"),
+            row("udp", "192.168.0.24", "47812", "chrome"),
+        ];
+        let (rows, _) = apply_listener_session(&mut session, with_client);
+        assert!(rows.iter().all(|r| r.local_port != "47812"));
+        assert!(session.alerts.is_empty());
+    }
+
+    #[test]
+    fn dns_talkers_accumulate_across_polls() {
+        let mut acc = HashMap::new();
+        let a = ConnectionRow {
+            protocol: "udp".into(),
+            local_ip: "127.0.0.1".into(),
+            local_port: "55555".into(),
+            remote_ip: "1.1.1.1".into(),
+            remote_port: "53".into(),
+            state: "UNCONN".into(),
+            process: Some("firefox".into()),
+            pid: Some(9),
+            domain: None,
+            domain_source: None,
+        };
+        remember_dns_talker(&mut acc, &a);
+        remember_dns_talker(&mut acc, &a);
+        assert_eq!(acc.len(), 1);
+        let closed = ConnectionRow {
+            protocol: "tcp".into(),
+            local_ip: "127.0.0.1".into(),
+            local_port: "1".into(),
+            remote_ip: "1.1.1.1".into(),
+            remote_port: "443".into(),
+            state: "ESTABLISHED".into(),
+            process: Some("firefox".into()),
+            pid: Some(9),
+            domain: None,
+            domain_source: None,
+        };
+        remember_dns_talker(&mut acc, &closed);
+        assert_eq!(acc.len(), 1, "sin socket DNS no se borra el historial");
+    }
 }

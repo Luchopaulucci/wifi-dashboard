@@ -30,7 +30,7 @@ export function BootTrafficView() {
       <TabHeader
         tab="boot"
         title="Desde que prende la PC"
-        hint="Contadores del kernel desde el arranque, consultas DNS de systemd-resolved, dominios observados y programas que ahora mismo hablan con :53. Cada número dice de dónde sale."
+        hint="Contadores del kernel desde el arranque, dominios del journal/caché (sin basura .arpa) y programas que hablaron con DNS en esta sesión. Si algo pide root, se dice acá."
       />
       {error ? (
         <p className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm">{error}</p>
@@ -38,6 +38,29 @@ export function BootTrafficView() {
       {data ? (
         <>
           <Notes privilege={data.privilege} notes={data.limitations} missing={data.missing} />
+          <aside
+            role="status"
+            data-testid="dns-monitor-status"
+            className={`rounded-2xl border px-4 py-3 font-ui text-sm leading-6 ${
+              data.dns_monitor.running
+                ? "border-teal-400/30 bg-teal-400/10 text-teal-50"
+                : "border-amber-400/30 bg-amber-400/10 text-amber-50"
+            }`}
+          >
+            <p className="text-xs font-semibold uppercase tracking-[0.16em]">
+              Monitor DNS {data.dns_monitor.running ? "en vivo" : "no disponible"}
+            </p>
+            <p className="mt-2">{data.dns_monitor.explanation}</p>
+            {data.dns_monitor.error ? (
+              <p className="mt-2 font-mono text-xs">{data.dns_monitor.error}</p>
+            ) : null}
+            {data.dns_monitor.needs_privilege ? (
+              <p className="mt-2 text-xs">
+                Esto pide privilegios que Señal no va a tomar. Sin root no hay consultas DNS en vivo
+                por `resolvectl monitor`.
+              </p>
+            ) : null}
+          </aside>
           <div className="grid gap-3 md:grid-cols-2">
             {data.counters.map((c) => (
               <article key={c.id} className="card rounded-2xl px-4 py-4">
@@ -86,7 +109,7 @@ export function BootTrafficView() {
             ) : null}
           </article>
           <article className="card overflow-auto rounded-2xl">
-            <h3 className="px-4 pt-4 text-lg">Programas hablando con DNS ahora</h3>
+            <h3 className="px-4 pt-4 text-lg">Programas que hablaron con DNS en esta sesión</h3>
             <table className="mt-2 w-full font-ui text-sm">
               <thead className="bg-white/5 text-left text-xs uppercase tracking-wider text-slate-400">
                 <tr>

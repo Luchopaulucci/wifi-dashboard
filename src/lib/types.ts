@@ -240,6 +240,13 @@ export interface DnsProgramRow {
   note: string;
 }
 
+export interface DnsMonitorStatus {
+  running: boolean;
+  error: string | null;
+  needs_privilege: boolean;
+  explanation: string;
+}
+
 export interface BootTrafficReport {
   collected_at_ms: number;
   counters: TrafficCounter[];
@@ -248,6 +255,7 @@ export interface BootTrafficReport {
   missing: string[];
   privilege: PrivilegeHint | null;
   limitations: string[];
+  dns_monitor: DnsMonitorStatus;
 }
 
 export type Reachability = "local_only" | "network_all" | "lan_address";
@@ -260,12 +268,14 @@ export interface ListenerRow {
   pid: number | null;
   reach: Reachability;
   reach_label: string;
+  key: string;
   is_new: boolean;
 }
 
 export interface ListenersReport {
   collected_at_ms: number;
   rows: ListenerRow[];
+  alerts: ListenerRow[];
   new_count: number;
   source: string | null;
   missing: string[];

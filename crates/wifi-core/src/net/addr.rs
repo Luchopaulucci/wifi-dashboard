@@ -37,7 +37,7 @@ fn is_doc(ip: Ipv4Addr) -> bool {
         || (o[0] == 203 && o[1] == 0 && o[2] == 113)
 }
 
-/// IP pública ruteable. Sirve para no mandar RFC1918 a ip-api y para marcar el ISP.
+/// IP pública ruteable. Sirve para no mandar RFC1918 a RDAP y para marcar el ISP.
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {

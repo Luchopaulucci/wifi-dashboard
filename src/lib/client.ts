@@ -31,7 +31,8 @@ export interface DashboardClient {
   firewall(): Promise<FirewallReport>;
   bootTraffic(): Promise<BootTrafficReport>;
   listeners(): Promise<ListenersReport>;
-  lookupIp(ip: string): Promise<GeoInfo>;
+  dismissListener(key: string): Promise<void>;
+  lookupIp(ip: string, allowExternal: boolean): Promise<GeoInfo>;
   startTrace(destination: string): Promise<void>;
   cancelTrace(): Promise<void>;
   onTrace(cb: (ev: TraceEvent) => void): Promise<() => void>;
@@ -78,7 +79,15 @@ function mockClient(): DashboardClient {
     async listeners() {
       return mockListeners();
     },
-    async lookupIp(ip) {
+    async dismissListener() {
+      /* mock: la alerta se descarta en la UI */
+    },
+    async lookupIp(ip, allowExternal) {
+      if (!allowExternal) {
+        throw new Error(
+          "Las consultas externas están apagadas (opt-in). Si las prendés, Señal manda SOLO esta IP pública por HTTPS a rdap.org para preguntar país y organización del bloque. No se manda tu nombre, tu red local ni otras IPs.",
+        );
+      }
       if (
         ip.startsWith("10.") ||
         ip.startsWith("192.168.") ||
@@ -130,7 +139,9 @@ async function tauriClient(): Promise<DashboardClient> {
     firewall: () => invoke<FirewallReport>("get_firewall"),
     bootTraffic: () => invoke<BootTrafficReport>("get_boot_traffic"),
     listeners: () => invoke<ListenersReport>("get_listeners"),
-    lookupIp: (ip) => invoke<GeoInfo>("lookup_remote_ip", { ip }),
+    dismissListener: (key) => invoke("dismiss_listener", { key }),
+    lookupIp: (ip, allowExternal) =>
+      invoke<GeoInfo>("lookup_remote_ip", { ip, allowExternal }),
     startTrace: (destination) => invoke("start_trace_route", { destination }),
     cancelTrace: () => invoke("cancel_trace_route"),
     onTrace: async (cb) => {

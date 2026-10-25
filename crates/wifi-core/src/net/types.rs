@@ -161,6 +161,25 @@ pub struct DnsProgramRow {
     pub note: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DnsMonitorStatus {
+    pub running: bool,
+    pub error: Option<String>,
+    pub needs_privilege: bool,
+    pub explanation: String,
+}
+
+impl Default for DnsMonitorStatus {
+    fn default() -> Self {
+        Self {
+            running: false,
+            error: None,
+            needs_privilege: false,
+            explanation: "El monitor DNS todavía no arrancó.".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TalkerTag {
     pub label: String,
@@ -176,6 +195,7 @@ pub struct BootTrafficReport {
     pub missing: Vec<String>,
     pub privilege: Option<PrivilegeHint>,
     pub limitations: Vec<String>,
+    pub dns_monitor: DnsMonitorStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +215,7 @@ pub struct ListenerRow {
     pub pid: Option<u32>,
     pub reach: Reachability,
     pub reach_label: String,
+    pub key: String,
     pub is_new: bool,
 }
 
@@ -202,6 +223,7 @@ pub struct ListenerRow {
 pub struct ListenersReport {
     pub collected_at_ms: u64,
     pub rows: Vec<ListenerRow>,
+    pub alerts: Vec<ListenerRow>,
     pub new_count: u64,
     pub source: Option<String>,
     pub missing: Vec<String>,
