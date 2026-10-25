@@ -78,6 +78,8 @@ pub enum ElevateError {
     AgentMissing,
     PkexecMissing,
     TargetMissing(String),
+    Failed { code: Option<i32>, detail: String },
+    Timeout,
     Command(String),
 }
 
@@ -87,15 +89,46 @@ impl ElevateError {
         "No hay agente de polkit o no se pudo autorizar (pkexec 127). Instalá policykit-1 y un agente de autenticación. Señal no corre como root.";
     pub const PKEXEC_MISSING: &'static str =
         "No está `pkexec`. En Ubuntu: sudo apt install policykit-1. Señal no corre como root.";
+    pub const FAILED_PREFIX: &'static str = "El comando elevado falló";
+    pub const TIMEOUT: &'static str =
+        "Se acabó el tiempo de espera. Señal dejó de leer la salida. El comando elevado corre como root: este usuario no puede mandarle una señal, así que puede seguir hasta que termine.";
+    /// Cancelar/timeout matan a `pkexec` (proceso nuestro). El hijo root no.
+    pub const CANNOT_SIGNAL: &'static str =
+        "Cancelar o el timeout solo cierran la espera: el comando elevado corre como root y Señal no puede mandarle una señal. Puede seguir hasta que termine.";
 
     pub fn from_output(out: CmdOutput) -> std::result::Result<CmdOutput, Self> {
-        if out.success {
+        if out.success || matches!(out.code, Some(0)) {
             return Ok(out);
         }
         match out.code {
             Some(126) => Err(Self::Cancelled),
             Some(127) => Err(Self::AgentMissing),
-            _ => Ok(out),
+            code => {
+                let detail = out.combined();
+                let detail = detail.trim();
+                Err(Self::Failed {
+                    code,
+                    detail: detail.to_string(),
+                })
+            }
+        }
+    }
+
+    pub fn failed_message(code: Option<i32>, detail: &str) -> String {
+        let code_s = code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "desconocido".into());
+        let extra = detail.trim();
+        if extra.is_empty() {
+            format!(
+                "{} (código {code_s}). No se cambió nada en el sistema.",
+                Self::FAILED_PREFIX
+            )
+        } else {
+            format!(
+                "{} (código {code_s}). No se cambió nada en el sistema. {extra}",
+                Self::FAILED_PREFIX
+            )
         }
     }
 
@@ -105,6 +138,8 @@ impl ElevateError {
             Self::AgentMissing => Self::AGENT_MISSING.to_string(),
             Self::PkexecMissing => Self::PKEXEC_MISSING.to_string(),
             Self::TargetMissing(bin) => format!("No está el binario `{bin}`."),
+            Self::Failed { code, detail } => Self::failed_message(*code, detail),
+            Self::Timeout => Self::TIMEOUT.to_string(),
             Self::Command(detalle) => detalle.clone(),
         }
     }
@@ -113,8 +148,27 @@ impl ElevateError {
         text == Self::CANCELLED
             || text == Self::AGENT_MISSING
             || text == Self::PKEXEC_MISSING
+            || text == Self::TIMEOUT
+            || text.starts_with(Self::FAILED_PREFIX)
             || text.starts_with("No está el binario `")
+            || text.contains(Self::CANNOT_SIGNAL)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PKEXEC_CAPTURES: std::cell::RefCell<Vec<PrivilegedAction>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_pkexec_capture(action: PrivilegedAction) {
+    PKEXEC_CAPTURES.with(|c| c.borrow_mut().push(action));
+}
+
+#[cfg(test)]
+pub(crate) fn take_pkexec_captures() -> Vec<PrivilegedAction> {
+    PKEXEC_CAPTURES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Elevación vía el camino existente (`resolve_bin` + `run_cmd_capture` / `spawn_allowed`).
@@ -129,11 +183,21 @@ impl Pkexec {
     }
 
     pub fn capture(action: PrivilegedAction) -> std::result::Result<CmdOutput, ElevateError> {
+        #[cfg(test)]
+        record_pkexec_capture(action);
         let argv = Self::prepare_argv(action.bin(), action.args())?;
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let out = run_cmd_capture("pkexec", &refs, action.timeout())
-            .map_err(|e| ElevateError::Command(e.to_string()))?;
-        ElevateError::from_output(out)
+        match run_cmd_capture("pkexec", &refs, action.timeout()) {
+            Ok(out) => ElevateError::from_output(out),
+            Err(e) => {
+                let s = e.to_string();
+                if s.contains("tiempo de espera") {
+                    Err(ElevateError::Timeout)
+                } else {
+                    Err(ElevateError::Command(s))
+                }
+            }
+        }
     }
 
     pub fn spawn(
@@ -220,7 +284,7 @@ pub fn privilege_hint(binary: &str, capability: &str) -> PrivilegeHint {
             "nft",
             "CAP_NET_ADMIN",
             "Leer `nft list ruleset` habla con nf_tables vía netlink. El kernel lo deja a root o a quien tenga CAP_NET_ADMIN. Señal corre como tu usuario y no va a tocar las reglas: solo las quiere listar.".into(),
-            "Un clic abre el diálogo de contraseña del sistema (pkexec). Señal no corre como root y no escribe reglas.",
+            "Un clic abre el diálogo de contraseña del sistema (pkexec). Señal no corre como root y no escribe reglas. Cancelar o el timeout no matan el proceso elevado: corre como root hasta que termina.",
         ),
         "conntrack" => PrivilegeHint::new(
             "conntrack",
@@ -242,7 +306,7 @@ pub fn privilege_hint(binary: &str, capability: &str) -> PrivilegeHint {
             format!(
                 "`{binary}` con ICMP suele necesitar CAP_NET_RAW (como ping). En Ubuntu el default es `tracepath` (UDP) y casi siempre anda sin root: Señal lo intenta primero."
             ),
-            "Un clic abre el diálogo de contraseña del sistema (pkexec) y relanza traceroute. Si cancelás, no pasa nada.",
+            "Un clic abre el diálogo de contraseña del sistema (pkexec) y relanza traceroute. Si el UDP de tracepath no da hops, se prueba `traceroute -n -q 1 -w 2`. Cancelar o el timeout no matan el traceroute elevado: corre como root hasta que termina.",
         ),
         "tracepath" | "tracepath6" => PrivilegeHint::new(
             binary,
@@ -453,17 +517,22 @@ mod tests {
         assert!(ElevateError::is_user_message(ElevateError::CANCELLED));
         assert!(ElevateError::is_user_message(ElevateError::AGENT_MISSING));
         assert!(ElevateError::is_user_message(ElevateError::PKEXEC_MISSING));
+        assert!(ElevateError::is_user_message(ElevateError::TIMEOUT));
+        assert!(ElevateError::is_user_message(
+            &ElevateError::failed_message(Some(1), "syntax error")
+        ));
     }
 
     #[test]
-    fn success_and_other_codes_pass_through() {
+    fn unexpected_pkexec_code_is_warning_not_empty_ok() {
         let ok = CmdOutput {
             stdout: "table inet filter {}".into(),
             stderr: String::new(),
             success: true,
             code: Some(0),
         };
-        assert!(ElevateError::from_output(ok).is_ok());
+        let passed = ElevateError::from_output(ok).expect("0 es ok");
+        assert!(passed.success);
 
         let other = CmdOutput {
             stdout: String::new(),
@@ -471,9 +540,18 @@ mod tests {
             success: false,
             code: Some(1),
         };
-        let passed = ElevateError::from_output(other).expect("1 no es cancel");
-        assert!(!passed.success);
-        assert_eq!(passed.code, Some(1));
+        let err = ElevateError::from_output(other).expect_err("1 no se traga como ruleset vacío");
+        assert_eq!(
+            err,
+            ElevateError::Failed {
+                code: Some(1),
+                detail: "syntax error".into()
+            }
+        );
+        let msg = err.user_message();
+        assert!(msg.starts_with(ElevateError::FAILED_PREFIX), "{msg}");
+        assert!(msg.contains("syntax error"), "{msg}");
+        assert!(ElevateError::is_user_message(&msg));
     }
 
     #[test]

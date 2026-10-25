@@ -536,6 +536,8 @@ pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std
     Ok(child)
 }
 
+/// Mata el PID que spawneamos (p.ej. `pkexec`). No alcanza al hijo root de
+/// pkexec: un usuario sin privilegios no le puede mandar señal.
 fn watchdog_kill(pid: u32, timeout: Duration) {
     std::thread::spawn(move || {
         std::thread::sleep(timeout);

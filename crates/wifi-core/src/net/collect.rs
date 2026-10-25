@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::command::{bin_exists, run_cmd_capture, spawn_allowed, validate_host};
 use crate::error::{CoreError, Result};
@@ -424,7 +424,7 @@ pub fn collect_firewall(elevate: Option<PrivilegedAction>) -> FirewallReport {
     let mut backend = None;
     let mut tables = Vec::new();
 
-    if bin_exists("nft") {
+    if elevate == Some(PrivilegedAction::NftList) || bin_exists("nft") {
         let action = PrivilegedAction::NftList;
         match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
@@ -830,20 +830,24 @@ where
                     }
                 }
                 if cancel.load(Ordering::Relaxed) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    reap_or_detach(child, true);
+                    let msg = if elevate {
+                        format!("Ruta cancelada. {}", ElevateError::CANNOT_SIGNAL)
+                    } else {
+                        "Ruta cancelada.".into()
+                    };
                     on_event(TraceEvent {
                         session_id: session_id.clone(),
                         kind: "cancelled".into(),
                         hop: None,
-                        message: Some("Ruta cancelada.".into()),
+                        message: Some(msg),
                         tool: Some(bin.into()),
                         privilege: None,
                     });
                     return Ok(());
                 }
-                let status = child.wait();
-                let code = status.as_ref().ok().and_then(|s| s.code());
+                let status = reap_or_detach(child, false);
+                let code = status.as_ref().and_then(|s| s.code());
                 if elevate && matches!(code, Some(126) | Some(127)) {
                     let err = if code == Some(126) {
                         ElevateError::Cancelled
@@ -860,11 +864,27 @@ where
                     });
                     return Ok(());
                 }
-                let fail_perm = status.ok().is_some_and(|s| !s.success()) && hops.is_empty();
-                if fail_perm {
-                    last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
-                    if elevate {
-                        break;
+                if elevate
+                    && matches!(code, Some(c) if c != 0 && c != 126 && c != 127)
+                    && !hops.is_empty()
+                {
+                    on_event(TraceEvent {
+                        session_id: session_id.clone(),
+                        kind: "done".into(),
+                        hop: None,
+                        message: Some(ElevateError::failed_message(
+                            code,
+                            &format!("Listo con {bin} (salida parcial)."),
+                        )),
+                        tool: Some(bin.into()),
+                        privilege: None,
+                    });
+                    return Ok(());
+                }
+                // Sin hops: probar el siguiente (pkexec traceroute si tracepath no dio nada).
+                if trace_try_next_candidate(hops.len()) {
+                    if status.is_some_and(|s| !s.success()) {
+                        last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
                     }
                     continue;
                 }
@@ -920,6 +940,37 @@ where
         });
     }
     Ok(())
+}
+
+/// Sin hops hay que probar el siguiente binario. En elevado, un `tracepath`
+/// vacío no corta el fallback a `pkexec traceroute -n -q 1 -w 2 -- dest`.
+fn trace_try_next_candidate(hops: usize) -> bool {
+    hops == 0
+}
+
+/// Espera al wrapper (`pkexec` o el binario). Si no muere, no colgamos:
+/// el hijo root de pkexec no recibe nuestra señal.
+fn reap_or_detach(mut child: std::process::Child, kill: bool) -> Option<std::process::ExitStatus> {
+    if kill {
+        let _ = child.kill();
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    match child.try_wait() {
+        Ok(Some(status)) => Some(status),
+        _ => {
+            // Evita que Drop de Child bloquee el hilo si el wait no avanza.
+            std::mem::forget(child);
+            None
+        }
+    }
 }
 
 pub fn default_gateway() -> Option<String> {
@@ -1245,7 +1296,7 @@ mod tests {
     #[test]
     fn collect_connections_skips_conntrack() {
         let mut ptr = PtrCache::default();
-        let report = collect_connections(&mut ptr);
+        let report = collect_connections(&mut ptr, None);
         assert!(report.sources.iter().all(|s| !s.contains("conntrack")));
         assert!(report
             .notes
@@ -1266,5 +1317,32 @@ mod tests {
         assert_eq!(report.source.as_deref(), Some("fixture"));
         assert!(!report.rows[0].is_new);
         assert!(report.notes.iter().any(|n| n.contains("Foto inicial")));
+    }
+
+    #[test]
+    fn elevated_empty_tracepath_falls_back_to_next() {
+        assert!(trace_try_next_candidate(0));
+        assert!(!trace_try_next_candidate(1));
+    }
+
+    #[test]
+    fn collect_firewall_nft_list_invokes_pkexec() {
+        let _ = crate::net::privilege::take_pkexec_captures();
+        let report = collect_firewall(Some(PrivilegedAction::NftList));
+        let captures = crate::net::privilege::take_pkexec_captures();
+        assert!(
+            captures.contains(&PrivilegedAction::NftList),
+            "collect_firewall(Some(NftList)) debe llamar Pkexec::capture; notes={:?} missing={:?} captures={captures:?}",
+            report.notes,
+            report.missing
+        );
+        let blob = format!("{:?} {:?}", report.notes, report.privilege);
+        assert!(
+            blob.contains("pkexec")
+                || blob.contains("El comando elevado")
+                || blob.contains("No está")
+                || report.privilege.is_some(),
+            "tiene que quedar rastro de la elevación: {blob}"
+        );
     }
 }
