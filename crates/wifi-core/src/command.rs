@@ -22,8 +22,20 @@ const ALLOWED_BINS: &[&str] = &[
     "tracepath6",
     "resolvectl",
     "journalctl",
+    "pkexec",
 ];
 const BIN_DIRS: &[&str] = &["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// pkexec necesita el bus de sesión y el display para el diálogo de polkit.
+/// El resto del entorno sigue limpio (PATH fijo, LC_ALL=C).
+const PKEXEC_ENV_KEEP: &[&str] = &[
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XAUTHORITY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+];
 
 /// Slot de argv: o un literal exacto, o un valor ya validado (iface/host/ipv4).
 #[derive(Clone, Copy, Debug)]
@@ -286,7 +298,29 @@ impl AllowedSpec {
 
 /// Allowlist por binario **y** argv exacto (slots validados aparte).
 pub fn args_are_allowed(name: &str, args: &[&str]) -> bool {
+    if name == "pkexec" {
+        return pkexec_inner_allowed(args);
+    }
     ALLOWED_COMMANDS.iter().any(|spec| spec.matches(name, args))
+}
+
+/// `pkexec <ruta allowlisted> <args fijos del binario interno>`.
+/// El interno tiene que pasar la misma allowlist de argv; no hay pkexec anidado.
+fn pkexec_inner_allowed(args: &[&str]) -> bool {
+    let Some((target, rest)) = args.split_first() else {
+        return false;
+    };
+    let path = Path::new(target);
+    let Some(bin) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if bin == "pkexec" || !ALLOWED_BINS.contains(&bin) {
+        return false;
+    }
+    if !BIN_DIRS.iter().any(|d| Path::new(d).join(bin) == path) {
+        return false;
+    }
+    ALLOWED_COMMANDS.iter().any(|spec| spec.matches(bin, rest))
 }
 
 fn ensure_args_allowed(name: &str, args: &[&str]) -> Result<()> {
@@ -397,9 +431,35 @@ pub fn validate_host(raw: &str) -> Result<String> {
     }
 }
 
+fn prepare_command(name: &str, args: &[&str]) -> Result<Command> {
+    let bin = resolve_bin(name)?;
+    let mut cmd = Command::new(&bin);
+    cmd.args(args.iter().map(OsStr::new));
+    cmd.env_clear();
+    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    cmd.env("LC_ALL", "C");
+    cmd.env("LANG", "C");
+    if name == "pkexec" {
+        for key in PKEXEC_ENV_KEEP {
+            if let Some(val) = std::env::var_os(key) {
+                cmd.env(key, val);
+            }
+        }
+    }
+    Ok(cmd)
+}
+
 pub fn resolve_bin(name: &str) -> Result<PathBuf> {
     if !ALLOWED_BINS.contains(&name) {
         return Err(CoreError::CommandNotAllowed(name.to_string()));
+    }
+    #[cfg(test)]
+    if test_runner::is_hidden(name) {
+        return Err(CoreError::BinaryMissing(name.to_string()));
+    }
+    #[cfg(test)]
+    if let Some(path) = test_runner::resolve_override(name) {
+        return Ok(path);
     }
     for dir in BIN_DIRS {
         let candidate = Path::new(dir).join(name);
@@ -422,13 +482,7 @@ pub fn run_cmd(name: &str, args: &[&str]) -> Result<String> {
 
 pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<String> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    let mut cmd = prepare_command(name, args)?;
 
     let output = if timeout.as_millis() == 0 {
         cmd.output()
@@ -457,13 +511,11 @@ pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<S
 /// detectar "permission denied" vs reglas vacías vs traceroute con hops *).
 pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    #[cfg(test)]
+    if let Some(out) = test_runner::capture_override(name, args) {
+        return Ok(out);
+    }
+    let mut cmd = prepare_command(name, args)?;
 
     let output = wait_with_timeout(&mut cmd, timeout).map_err(|e| CoreError::CommandFailed {
         comando: name.to_string(),
@@ -483,13 +535,11 @@ pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<C
 /// hilo mata el proceso al vencerse el tiempo.
 pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std::process::Child> {
     ensure_args_allowed(name, args)?;
-    let bin = resolve_bin(name)?;
-    let mut cmd = Command::new(&bin);
-    cmd.args(args.iter().map(OsStr::new));
-    cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
-    cmd.env("LC_ALL", "C");
-    cmd.env("LANG", "C");
+    #[cfg(test)]
+    if let Some(child) = test_runner::spawn_override(name, args) {
+        return child;
+    }
+    let mut cmd = prepare_command(name, args)?;
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     let child = cmd.spawn().map_err(|e| CoreError::CommandFailed {
@@ -502,6 +552,8 @@ pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std
     Ok(child)
 }
 
+/// Mata el PID que spawneamos (p.ej. `pkexec`). No alcanza al hijo root de
+/// pkexec: un usuario sin privilegios no le puede mandar señal.
 fn watchdog_kill(pid: u32, timeout: Duration) {
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
@@ -577,6 +629,155 @@ fn wait_with_timeout(
     })
 }
 
+/// Runner inyectable solo en tests: no spawnea pkexec real.
+#[cfg(test)]
+pub mod test_runner {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    thread_local! {
+        static ENABLED: RefCell<bool> = const { RefCell::new(false) };
+        static RESOLVE: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
+        static HIDDEN: RefCell<std::collections::HashSet<String>> =
+            RefCell::new(std::collections::HashSet::new());
+        static REPLY: RefCell<Option<CmdOutput>> = const { RefCell::new(None) };
+        static ARGV: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) };
+        static SLOW_STDERR: RefCell<Option<u64>> = const { RefCell::new(None) };
+        static SPAWN_SCRIPTS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    }
+
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ENABLED.with(|e| *e.borrow_mut() = false);
+            RESOLVE.with(|m| m.borrow_mut().clear());
+            HIDDEN.with(|h| h.borrow_mut().clear());
+            REPLY.with(|r| *r.borrow_mut() = None);
+            ARGV.with(|a| a.borrow_mut().clear());
+            SLOW_STDERR.with(|s| *s.borrow_mut() = None);
+            SPAWN_SCRIPTS.with(|m| m.borrow_mut().clear());
+        }
+    }
+
+    pub fn install() -> Guard {
+        ENABLED.with(|e| *e.borrow_mut() = true);
+        Guard
+    }
+
+    pub fn set_bin(name: &str, path: &str) {
+        RESOLVE.with(|m| {
+            m.borrow_mut().insert(name.to_string(), PathBuf::from(path));
+        });
+    }
+
+    pub fn hide_bin(name: &str) {
+        HIDDEN.with(|h| {
+            h.borrow_mut().insert(name.to_string());
+        });
+    }
+
+    pub fn unhide_bin(name: &str) {
+        HIDDEN.with(|h| {
+            h.borrow_mut().remove(name);
+        });
+    }
+
+    pub(super) fn is_hidden(name: &str) -> bool {
+        ENABLED.with(|e| *e.borrow()) && HIDDEN.with(|h| h.borrow().contains(name))
+    }
+
+    pub fn set_capture_ok(stdout: &str) {
+        REPLY.with(|r| {
+            *r.borrow_mut() = Some(CmdOutput {
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                success: true,
+                code: Some(0),
+            });
+        });
+    }
+
+    pub fn take_argv() -> Vec<Vec<String>> {
+        ARGV.with(|a| std::mem::take(&mut *a.borrow_mut()))
+    }
+
+    /// Child que imprime un hop y deja stderr abierto `hold_secs` (nieto).
+    /// Matar al padre no cierra stderr: sirve para probar que cancel no hace join.
+    pub fn set_spawn_slow_stderr(hold_secs: u64) {
+        SLOW_STDERR.with(|s| *s.borrow_mut() = Some(hold_secs));
+    }
+
+    pub fn set_spawn_script(name: &str, script: &str) {
+        SPAWN_SCRIPTS.with(|m| {
+            m.borrow_mut().insert(name.to_string(), script.to_string());
+        });
+    }
+
+    fn spawn_script(name: &str, args: &[&str], script: &str) -> Result<std::process::Child> {
+        let resolved =
+            resolve_override(name).unwrap_or_else(|| PathBuf::from(format!("/usr/bin/{name}")));
+        let mut argv = vec![resolved.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        ARGV.with(|a| a.borrow_mut().push(argv));
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| CoreError::CommandFailed {
+                comando: name.to_string(),
+                detalle: e.to_string(),
+            })
+    }
+
+    pub(super) fn spawn_override(name: &str, args: &[&str]) -> Option<Result<std::process::Child>> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        if let Some(hold) = SLOW_STDERR.with(|s| *s.borrow()) {
+            if name == "pkexec" {
+                let script =
+                    format!("sleep {hold} >&2 & printf ' 1  1.1.1.1  1.000 ms\\n'; exec sleep 30");
+                return Some(spawn_script(name, args, &script));
+            }
+        }
+        let script = SPAWN_SCRIPTS.with(|m| m.borrow().get(name).cloned())?;
+        Some(spawn_script(name, args, &script))
+    }
+
+    pub(super) fn resolve_override(name: &str) -> Option<PathBuf> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        RESOLVE.with(|m| m.borrow().get(name).cloned())
+    }
+
+    pub(super) fn capture_override(name: &str, args: &[&str]) -> Option<CmdOutput> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        if name != "pkexec" {
+            return None;
+        }
+        let pkexec = resolve_override("pkexec").unwrap_or_else(|| PathBuf::from("/usr/bin/pkexec"));
+        let mut argv = vec![pkexec.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        ARGV.with(|a| a.borrow_mut().push(argv));
+        Some(REPLY.with(|r| {
+            r.borrow().clone().unwrap_or(CmdOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+                code: Some(0),
+            })
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +844,10 @@ mod tests {
             Ok(_) | Err(CoreError::BinaryMissing(_))
         ));
         assert!(matches!(
+            resolve_bin("pkexec"),
+            Ok(_) | Err(CoreError::BinaryMissing(_))
+        ));
+        assert!(matches!(
             resolve_bin("bash"),
             Err(CoreError::CommandNotAllowed(_))
         ));
@@ -687,6 +892,19 @@ mod tests {
         assert!(!args_are_allowed("bash", &["-c", "id"]));
         assert!(!args_are_allowed("tracepath", &["-n", "--", "-n"]));
         assert!(ensure_args_allowed("nft", &["flush", "ruleset"]).is_err());
+        assert!(args_are_allowed(
+            "pkexec",
+            &["/usr/sbin/nft", "list", "ruleset"]
+        ));
+        assert!(!args_are_allowed(
+            "pkexec",
+            &["/usr/sbin/nft", "flush", "ruleset"]
+        ));
+        assert!(!args_are_allowed("pkexec", &["/usr/bin/bash", "-c", "id"]));
+        assert!(!args_are_allowed(
+            "pkexec",
+            &["/tmp/nft", "list", "ruleset"]
+        ));
     }
 
     #[test]

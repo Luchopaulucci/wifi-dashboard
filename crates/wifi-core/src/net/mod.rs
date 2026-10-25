@@ -2,7 +2,7 @@
 //! tráfico desde el arranque y puertos en escucha.
 //!
 //! Nunca cambia el estado del sistema. Si un comando pide root/CAP_NET_ADMIN,
-//! se devuelve un panel explicativo en vez de fallar.
+//! se devuelve un panel con un botón que eleva esa acción vía pkexec.
 
 mod addr;
 mod collect;
@@ -19,10 +19,10 @@ mod trace;
 
 pub use addr::{is_public_ip, parse_ip_opt};
 pub use collect::{
-    apply_listener_session, collect_boot_traffic, collect_connections, collect_firewall,
-    collect_listeners, collect_nat, default_gateway, ingest_monitor_line, listener_keys,
-    lookup_ptr, monitor_rows, remember_dns_talker, spawn_dns_monitor, start_trace, GeoCache,
-    ListenerScan, ListenerSession, PtrCache, TraceSession,
+    alloc_trace_session, apply_listener_session, collect_boot_traffic, collect_connections,
+    collect_firewall, collect_listeners, collect_nat, default_gateway, ingest_monitor_line,
+    listener_keys, lookup_ptr, monitor_rows, remember_dns_talker, spawn_dns_monitor, start_trace,
+    GeoCache, ListenerScan, ListenerSession, PtrCache, TraceSession,
 };
 pub use conntrack::parse_conntrack;
 pub use criollo::explain_rule_criollo;
@@ -35,7 +35,9 @@ pub use geo::{
     geo_opt_in_denied_message, lookup_ip_external, parse_ip_api, parse_rdap, rdap_source_label,
     RateLimiter,
 };
-pub use privilege::{is_permission_error, privilege_hint, PrivilegeHint};
+pub use privilege::{
+    is_permission_error, privilege_hint, ElevateError, Pkexec, PrivilegeHint, PrivilegedAction,
+};
 pub use ss::{
     classify_reach, is_ephemeral_udp, listener_key, parse_ss_listeners, parse_ss_sockets,
 };

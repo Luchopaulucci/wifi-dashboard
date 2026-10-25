@@ -1,7 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getClient } from "../../lib/client";
 import { formatMs } from "../../lib/format";
-import type { GeoInfo, PrivilegeHint, TraceHop } from "../../lib/types";
+import {
+  applyTraceEvent,
+  beginRouteSession,
+  bindRouteSession,
+  emptyRouteTraceState,
+  type RouteTraceState,
+} from "../../lib/route-trace";
+import type { GeoInfo, TraceEvent } from "../../lib/types";
 import { GeoOptIn } from "./GeoOptIn";
 import { Notes } from "./Notes";
 import { TabHeader } from "./ExplainButton";
@@ -18,54 +25,57 @@ const KIND_LABEL: Record<string, string> = {
 
 export function RouteView() {
   const [dest, setDest] = useState("1.1.1.1");
-  const [hops, setHops] = useState<TraceHop[]>([]);
-  const [status, setStatus] = useState("Escribí un destino y dale a Trazar.");
-  const [tool, setTool] = useState<string | null>(null);
-  const [privilege, setPrivilege] = useState<PrivilegeHint | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [trace, setTrace] = useState<RouteTraceState>(() => emptyRouteTraceState());
+  const traceRef = useRef(trace);
+  traceRef.current = trace;
+  const pendingRef = useRef<TraceEvent[]>([]);
+  const holdRef = useRef(false);
   const [ispGeo, setIspGeo] = useState<GeoInfo | null>(null);
   const [geoEnabled, setGeoEnabled] = useState(false);
 
+  const flushBoundSession = (sessionId: string) => {
+    let next = bindRouteSession(traceRef.current, sessionId);
+    traceRef.current = next;
+    holdRef.current = false;
+    const queued = pendingRef.current;
+    pendingRef.current = [];
+    for (const ev of queued) {
+      next = applyTraceEvent(next, ev);
+    }
+    traceRef.current = next;
+    setTrace(next);
+    if (queued.some((ev) => ev.kind === "start" && next.sessionId === ev.session_id)) {
+      setIspGeo(null);
+    }
+  };
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    let cancelled = false;
+    let gone = false;
     (async () => {
       const client = await getClient();
       unlisten = await client.onTrace((ev) => {
-        if (ev.tool) setTool(ev.tool);
-        if (ev.privilege) setPrivilege(ev.privilege);
-        if (ev.kind === "start") {
-          setHops([]);
+        if (holdRef.current && traceRef.current.sessionId == null) {
+          pendingRef.current.push(ev);
+          return;
+        }
+        const next = applyTraceEvent(traceRef.current, ev);
+        traceRef.current = next;
+        setTrace(next);
+        if (ev.kind === "start" && next.sessionId === ev.session_id) {
           setIspGeo(null);
-          setStatus(ev.message ?? "Trazando…");
-        } else if (ev.kind === "hop" && ev.hop) {
-          setHops((prev) => {
-            const next = prev.filter((h) => h.hop !== ev.hop!.hop);
-            next.push(ev.hop!);
-            next.sort((a, b) => a.hop - b.hop);
-            return next;
-          });
-        } else if (ev.kind === "done") {
-          setBusy(false);
-          setStatus(ev.message ?? "Listo.");
-        } else if (ev.kind === "cancelled") {
-          setBusy(false);
-          setStatus("Cancelado.");
-        } else if (ev.kind === "error") {
-          setBusy(false);
-          setStatus(ev.message ?? "No se pudo trazar.");
         }
       });
     })().catch(() => undefined);
     return () => {
-      cancelled = true;
+      gone = true;
       unlisten?.();
-      void cancelled;
+      void gone;
     };
   }, []);
 
   useEffect(() => {
-    const isp = hops.find((h) => h.kind === "isp_start" && h.address);
+    const isp = trace.hops.find((h) => h.kind === "isp_start" && h.address);
     if (!isp?.address || !geoEnabled) return;
     let gone = false;
     (async () => {
@@ -80,26 +90,56 @@ export function RouteView() {
     return () => {
       gone = true;
     };
-  }, [hops, geoEnabled]);
+  }, [trace.hops, geoEnabled]);
 
-  const onGo = async () => {
-    setBusy(true);
-    setPrivilege(null);
-    setHops([]);
-    setStatus("Trazando…");
+  const onElevate = async () => {
+    holdRef.current = true;
+    pendingRef.current = [];
+    const next = beginRouteSession(traceRef.current, "Pidiendo permisos…");
+    traceRef.current = next;
+    setTrace(next);
     try {
       const client = await getClient();
-      await client.startTrace(dest.trim());
+      const sessionId = await client.startTrace(dest.trim(), true);
+      flushBoundSession(sessionId);
     } catch (err) {
-      setBusy(false);
-      setStatus(err instanceof Error ? err.message : String(err));
+      holdRef.current = false;
+      pendingRef.current = [];
+      setTrace((prev) => ({
+        ...prev,
+        busy: false,
+        elevateError: err instanceof Error ? err.message : String(err),
+      }));
+    }
+  };
+
+  const onGo = async () => {
+    holdRef.current = true;
+    pendingRef.current = [];
+    const next = beginRouteSession(
+      { ...traceRef.current, privilege: null },
+      "Trazando…",
+    );
+    traceRef.current = next;
+    setTrace(next);
+    try {
+      const client = await getClient();
+      const sessionId = await client.startTrace(dest.trim());
+      flushBoundSession(sessionId);
+    } catch (err) {
+      holdRef.current = false;
+      pendingRef.current = [];
+      setTrace((prev) => ({
+        ...prev,
+        busy: false,
+        status: err instanceof Error ? err.message : String(err),
+      }));
     }
   };
 
   const onCancel = async () => {
     const client = await getClient();
     await client.cancelTrace();
-    setBusy(false);
   };
 
   return (
@@ -109,7 +149,14 @@ export function RouteView() {
         title="Ruta"
         hint="En Ubuntu usamos tracepath primero (UDP, sin root). Marcamos el router de casa, dónde aparece la primera IP pública (ISP) y los hops que no contestan. pmtu/asymm no son RTT."
       />
-      {privilege ? <Notes privilege={privilege} /> : null}
+      {trace.privilege ? (
+        <Notes
+          privilege={trace.privilege}
+          onElevate={trace.privilege.action ? () => void onElevate() : undefined}
+          elevateBusy={trace.busy}
+          elevateError={trace.elevateError}
+        />
+      ) : null}
       <GeoOptIn enabled={geoEnabled} onChange={setGeoEnabled} />
       <form
         className="flex flex-wrap items-center gap-2"
@@ -126,12 +173,12 @@ export function RouteView() {
         />
         <button
           type="submit"
-          disabled={busy || !dest.trim()}
+          disabled={trace.busy || !dest.trim()}
           className="rounded-full bg-teal-400 px-4 py-2 font-ui text-sm font-semibold text-slate-950 disabled:opacity-50"
         >
-          {busy ? "Trazando…" : "Trazar"}
+          {trace.busy ? "Trazando…" : "Trazar"}
         </button>
-        {busy ? (
+        {trace.busy ? (
           <button
             type="button"
             onClick={() => void onCancel()}
@@ -140,9 +187,15 @@ export function RouteView() {
             Cancelar
           </button>
         ) : null}
+        {trace.busy ? (
+          <p className="basis-full font-ui text-xs text-amber-200/80">
+            Cancelar solo deja de esperar. Un traceroute elevado corre como root: Señal no puede
+            mandarle una señal y puede seguir hasta que termine.
+          </p>
+        ) : null}
         <p className="font-ui text-xs text-slate-500">
-          {status}
-          {tool ? ` · ${tool}` : ""}
+          {trace.status}
+          {trace.tool ? ` · ${trace.tool}` : ""}
         </p>
       </form>
       {ispGeo ? (
@@ -163,7 +216,7 @@ export function RouteView() {
             </tr>
           </thead>
           <tbody>
-            {hops.map((h) => (
+            {trace.hops.map((h) => (
               <tr key={h.hop} className={`border-t border-white/5 ${h.lost ? "text-rose-200" : ""}`}>
                 <td className="px-4 py-3">{h.hop}</td>
                 <td className="px-4 py-3 font-mono text-xs">

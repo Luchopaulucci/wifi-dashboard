@@ -46,7 +46,7 @@ export const EXPLAIN: Record<
       "NAT reescribe direcciones. En una notebook 'común' casi no hay NAT propio: lo hace el router. Si esta PC comparte Internet (hotspot, libvirt, Docker, LXD), sí vas a ver SNAT/masquerade.",
       "Tuple original: IP:puerto de adentro → destino. Tuple reply: cómo vuelve el paquete. Si orig.src ≠ reply.dst, alguien reescribió el origen (SNAT). Si orig.dst ≠ reply.src, reescribió el destino (DNAT, port-forward).",
       "El timeout de conntrack no es 'cuánto lleva abierta': es cuántos segundos le quedan de vida si no hay más tráfico. ESTABLISHED/ASSURED dura mucho; UDP, poco.",
-      "Leer conntrack pide root. Señal no corre como root y no recomienda setcap CAP_NET_ADMIN (eso dejaría reescribir NAT/conntrack). El panel sugiere un `sudo conntrack -L` puntual, de solo lectura, en tu terminal.",
+      "Leer conntrack pide CAP_NET_ADMIN. Señal no corre como root: el panel pide la contraseña del sistema con pkexec y solo lista. No recomendamos setcap (dejaría reescribir NAT).",
     ],
   },
   firewall: {

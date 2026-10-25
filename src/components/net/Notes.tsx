@@ -5,14 +5,27 @@ export function Notes({
   privilege,
   notes,
   missing,
+  onElevate,
+  elevateBusy,
+  elevateError,
 }: {
   privilege?: PrivilegeHint | null;
   notes?: string[];
   missing?: string[];
+  onElevate?: () => void;
+  elevateBusy?: boolean;
+  elevateError?: string | null;
 }) {
   return (
     <div className="space-y-3">
-      {privilege ? <PrivilegePanel hint={privilege} /> : null}
+      {privilege ? (
+        <PrivilegePanel
+          hint={privilege}
+          onElevate={onElevate}
+          busy={elevateBusy}
+          error={elevateError}
+        />
+      ) : null}
       {missing && missing.length ? (
         <p className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 font-ui text-sm text-slate-300">
           Binarios o archivos que no están: {missing.join(", ")}. La pestaña sigue en solo lectura y

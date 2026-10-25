@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getClient } from "../../lib/client";
+import { useElevate } from "../../lib/elevate";
 import { CONNECTIONS_POLL_MS, TABLE_PAGE_SIZE, useSafePoll } from "../../lib/poll";
 import type { ConnectionRow, ConnectionsReport, GeoInfo } from "../../lib/types";
 import { GeoOptIn } from "./GeoOptIn";
@@ -35,6 +36,7 @@ export function ConnectionsView({ pageSize = TABLE_PAGE_SIZE }: { pageSize?: num
   const [geoError, setGeoError] = useState<string | null>(null);
   const [geoBusy, setGeoBusy] = useState(false);
   const [geoEnabled, setGeoEnabled] = useState(false);
+  const { elevate, busy: elevateBusy, error: elevateError } = useElevate("connections", setData);
 
   const refresh = useCallback(async () => {
     try {
@@ -109,7 +111,14 @@ export function ConnectionsView({ pageSize = TABLE_PAGE_SIZE }: { pageSize?: num
         </p>
       ) : null}
       {data ? (
-        <Notes privilege={data.privilege} notes={data.notes} missing={data.missing} />
+        <Notes
+          privilege={data.privilege}
+          notes={data.notes}
+          missing={data.missing}
+          onElevate={data.privilege?.action ? () => void elevate(data.privilege!.action!) : undefined}
+          elevateBusy={elevateBusy}
+          elevateError={elevateError}
+        />
       ) : null}
       <GeoOptIn enabled={geoEnabled} onChange={setGeoEnabled} />
       <div className="flex flex-wrap items-center gap-3">

@@ -7,7 +7,7 @@ use wifi_core::net::{
     parse_proc_net_dev, parse_proc_net_netstat, parse_proc_net_snmp, parse_rdap,
     parse_resolvectl_cache, parse_resolvectl_statistics, parse_ss_listeners, parse_ss_sockets,
     parse_trace_line, privilege_hint, snmp_counters, summarize_verdicts, ListenerSession,
-    Reachability, TraceHopKind,
+    PrivilegedAction, Reachability, TraceHopKind,
 };
 use wifi_core::validate_host;
 
@@ -264,8 +264,10 @@ fn geo_parsers_and_public_ip() {
 fn privilege_and_host_validation() {
     assert!(is_permission_error("Operation not permitted"));
     let nft = privilege_hint("nft", "CAP_NET_ADMIN");
-    assert!(nft.commands.iter().any(|c| c == "sudo nft list ruleset"));
-    assert!(nft.commands.iter().all(|c| !c.contains("setcap")));
+    assert_eq!(nft.action, Some(PrivilegedAction::NftList));
+    let blob = format!("{} {}", nft.why, nft.polkit_note);
+    assert!(!blob.contains("setcap"));
+    assert!(!blob.contains("sudo nft"));
     assert!(validate_host("https://one.one.one.one/cdn-cgi").is_ok());
     assert!(validate_host("8.8.8.8;rm").is_err());
     let c = explain_rule_criollo("ct state invalid drop");

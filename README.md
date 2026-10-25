@@ -17,7 +17,7 @@ Proyecto personal de Luciano. La UI y esta guía están en castellano (Argentina
 9. **Desde que prende** — contadores de `/proc/net/snmp`, `/proc/net/netstat`, `/proc/net/dev`; DNS de `resolvectl statistics` / caché / journal / monitor. Habladores de fondo (updates, telemetría) con lista curada. Cada número dice qué significa y de dónde sale.
 10. **Puertos abiertos** — `ss -tulpn`, local-only vs alcanzable desde la red, aviso si aparece un LISTEN nuevo en esta sesión.
 
-En todas esas pestañas hay **Explicame esto** (notas de curso de redes). Si un comando pide root/CAP_NET_ADMIN, la UI muestra por qué y el `setcap` o sudo puntual: **nunca se lanza Señal como root ni se cambia el firewall**.
+En todas esas pestañas hay **Explicame esto** (notas de curso de redes). Si un comando pide root/CAP_NET_ADMIN, la UI abre el diálogo de contraseña del sistema con `pkexec`: **nunca se lanza Señal como root ni se cambia el firewall**.
 
 ## Requisitos (Ubuntu / Debian)
 
@@ -106,7 +106,7 @@ Los artefactos quedan en `src-tauri/target/release/bundle/deb` y `.../appimage` 
 ## Permisos y seguridad
 
 - **No corre como root.** No uses `sudo` para lanzar Señal.
-- Los comandos se ejecutan con `std::process::Command` y una allowlist (`nmcli`, `iw`, `ip`, `ping`, `avahi-resolve-address`, `ss`, `conntrack`, `nft`, `iptables`, `iptables-save`, `traceroute`, `tracepath`, `resolvectl`, `journalctl`). No hay interpolación en shell. Interfaz, IPv4 y destinos de traceroute se validan antes de pasarlos como argumento. Nada de eso escribe reglas, flushea conntrack ni captura paquetes.
+- Los comandos se ejecutan con `std::process::Command` y una allowlist (`nmcli`, `iw`, `ip`, `ping`, `avahi-resolve-address`, `ss`, `conntrack`, `nft`, `iptables`, `iptables-save`, `traceroute`, `tracepath`, `resolvectl`, `journalctl`, `pkexec`). No hay interpolación en shell. Interfaz, IPv4 y destinos de traceroute se validan antes de pasarlos como argumento. Nada de eso escribe reglas, flushea conntrack ni captura paquetes.
 - No hay servidor de red escuchando. El IPC de Tauri es local. Vite en desarrollo escucha solo en `127.0.0.1`.
 - El barrido de equipos **nunca** sale de tu subred conectada y se recorta a /24.
 - `ping` en Ubuntu suele ser setuid y alcanza para ICMP de usuario. Si en tu distro falla, preferí una capability sobre el binario del sistema, no root:
@@ -116,12 +116,7 @@ Los artefactos quedan en `src-tauri/target/release/bundle/deb` y `.../appimage` 
   sudo setcap cap_net_raw+ep "$(command -v ping)"
   ```
 
-- `nft list ruleset` y `conntrack -L` suelen pedir **CAP_NET_ADMIN**. La UI lo explica; el hint típico es:
-
-  ```bash
-  sudo setcap cap_net_admin+ep "$(command -v nft)"
-  sudo setcap cap_net_admin+ep "$(command -v conntrack)"
-  ```
+- `nft list ruleset` y `conntrack -L` suelen pedir **CAP_NET_ADMIN**. La UI lo explica y, si hace falta, lanza esa acción puntual con `pkexec` (el sistema pide la contraseña). No hay `setcap` ni hay que copiar comandos sudo.
 
   No hace falta (ni conviene) abrir Señal con sudo. El lookup de país/ASN es una consulta **externa** (ip-api.com), cacheada y limitada.
 

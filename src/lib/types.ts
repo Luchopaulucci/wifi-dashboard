@@ -89,13 +89,29 @@ export type TabId =
   | "boot"
   | "ports";
 
+export type PrivilegedAction =
+  | "nft_list"
+  | "conntrack_list"
+  | "iptables_save"
+  | "iptables_list"
+  | "journal_resolved"
+  | "ss_list"
+  | "traceroute";
+
 export interface PrivilegeHint {
   binary: string;
   capability: string;
   why: string;
-  commands: string[];
+  action: PrivilegedAction | null;
+  commands?: string[];
   polkit_note: string;
 }
+
+export type PrivilegedReport =
+  | { kind: "firewall"; data: FirewallReport }
+  | { kind: "nat"; data: NatReport }
+  | { kind: "connections"; data: ConnectionsReport }
+  | { kind: "boot"; data: BootTrafficReport };
 
 export interface ConnectionRow {
   protocol: string;

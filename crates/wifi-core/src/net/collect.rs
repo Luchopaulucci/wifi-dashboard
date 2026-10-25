@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::command::{bin_exists, run_cmd_capture, spawn_allowed, validate_host};
 use crate::error::{CoreError, Result};
@@ -16,7 +16,10 @@ use super::dns::{
 };
 use super::firewall::{parse_iptables_save, parse_nft_ruleset, summarize_verdicts};
 use super::geo::RateLimiter;
-use super::privilege::{is_permission_error, is_permission_output, privilege_hint, PrivilegeHint};
+use super::privilege::{
+    capture_maybe, is_permission_error, is_permission_output, privilege_hint, ElevateError, Pkexec,
+    PrivilegeHint, PrivilegedAction,
+};
 use super::ss::{
     classify_reach, is_ephemeral_udp, listener_key, parse_ss_listeners, parse_ss_sockets,
     reach_label,
@@ -287,7 +290,10 @@ pub fn remember_dns_talker(acc: &mut HashMap<String, DnsProgramRow>, row: &Conne
     });
 }
 
-pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
+pub fn collect_connections(
+    ptr: &mut PtrCache,
+    elevate: Option<PrivilegedAction>,
+) -> ConnectionsReport {
     let mut missing = Vec::new();
     let mut sources = Vec::new();
     let mut notes = Vec::new();
@@ -295,14 +301,15 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
     let mut rows = Vec::new();
 
     if bin_exists("ss") {
-        let out = run_cmd_capture("ss", &["-H", "-tunap"], Duration::from_secs(5));
+        let ss = PrivilegedAction::SsList;
+        let out = capture_maybe(ss.bin(), ss.args(), Duration::from_secs(5), elevate);
         match out {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("ss", "CAP_NET_ADMIN"));
                 notes.push("ss respondió sin permiso; reintentamos sin -H.".into());
             }
             Ok(o) => {
-                let text = if o.stdout.trim().is_empty() {
+                let text = if o.stdout.trim().is_empty() && elevate.is_none() {
                     run_cmd_capture("ss", &["-tunap"], Duration::from_secs(5))
                         .map(|x| x.stdout)
                         .unwrap_or_default()
@@ -311,6 +318,10 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
                 };
                 rows = parse_ss_sockets(&text);
                 sources.push("ss -tunap".into());
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("ss", "CAP_NET_ADMIN"));
+                notes.push(msg);
             }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
@@ -334,7 +345,7 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
     }
 }
 
-pub fn collect_nat() -> NatReport {
+pub fn collect_nat(elevate: Option<PrivilegedAction>) -> NatReport {
     let mut missing = Vec::new();
     let mut notes = Vec::new();
     let mut privilege = None;
@@ -342,13 +353,18 @@ pub fn collect_nat() -> NatReport {
     let mut source = None;
 
     if bin_exists("conntrack") {
-        match run_cmd_capture("conntrack", &["-L"], Duration::from_secs(6)) {
+        let action = PrivilegedAction::ConntrackList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(6), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("conntrack", "CAP_NET_ADMIN"));
             }
             Ok(o) => {
                 translations = parse_conntrack(&o.stdout);
                 source = Some("conntrack -L".into());
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("conntrack", "CAP_NET_ADMIN"));
+                notes.push(msg);
             }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
@@ -401,7 +417,7 @@ pub fn collect_nat() -> NatReport {
     }
 }
 
-pub fn collect_firewall() -> FirewallReport {
+pub fn collect_firewall(elevate: Option<PrivilegedAction>) -> FirewallReport {
     let mut missing = Vec::new();
     let mut notes = Vec::new();
     let mut privilege = None;
@@ -409,7 +425,8 @@ pub fn collect_firewall() -> FirewallReport {
     let mut tables = Vec::new();
 
     if bin_exists("nft") {
-        match run_cmd_capture("nft", &["list", "ruleset"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::NftList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 privilege = Some(privilege_hint("nft", "CAP_NET_ADMIN"));
             }
@@ -417,15 +434,26 @@ pub fn collect_firewall() -> FirewallReport {
                 tables = parse_nft_ruleset(&o.stdout);
                 backend = Some("nft list ruleset".into());
             }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("nft", "CAP_NET_ADMIN"));
+                notes.push(msg);
+            }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
         }
     } else {
         missing.push("nft".into());
+        if elevate == Some(PrivilegedAction::NftList) {
+            notes.push(
+                "No está `nft`. En Ubuntu: sudo apt install nftables. No se pidió contraseña."
+                    .into(),
+            );
+        }
     }
 
     if tables.is_empty() && bin_exists("iptables-save") {
-        match run_cmd_capture("iptables-save", &["-c"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::IptablesSave;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 if privilege.is_none() {
                     privilege = Some(privilege_hint("iptables-save", "CAP_NET_ADMIN"));
@@ -436,6 +464,12 @@ pub fn collect_firewall() -> FirewallReport {
                 backend = Some("iptables-save -c".into());
             }
             Ok(_) => {}
+            Err(CoreError::Forbidden(msg)) => {
+                if privilege.is_none() {
+                    privilege = Some(privilege_hint("iptables-save", "CAP_NET_ADMIN"));
+                }
+                notes.push(msg);
+            }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
         }
@@ -444,7 +478,8 @@ pub fn collect_firewall() -> FirewallReport {
     }
 
     if tables.is_empty() && bin_exists("iptables") {
-        match run_cmd_capture("iptables", &["-S"], Duration::from_secs(8)) {
+        let action = PrivilegedAction::IptablesList;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(8), elevate) {
             Ok(o) if is_permission_output(&o) => {
                 if privilege.is_none() {
                     privilege = Some(privilege_hint("iptables", "CAP_NET_ADMIN"));
@@ -455,6 +490,12 @@ pub fn collect_firewall() -> FirewallReport {
                 backend = Some("iptables -S".into());
             }
             Ok(_) => {}
+            Err(CoreError::Forbidden(msg)) => {
+                if privilege.is_none() {
+                    privilege = Some(privilege_hint("iptables", "CAP_NET_ADMIN"));
+                }
+                notes.push(msg);
+            }
             Err(CoreError::BinaryMissing(b)) => missing.push(b),
             Err(e) => notes.push(e.to_string()),
         }
@@ -509,6 +550,7 @@ pub fn collect_boot_traffic(
     monitor_status: &DnsMonitorStatus,
     session_programs: &mut HashMap<String, DnsProgramRow>,
     connections: &[ConnectionRow],
+    elevate: Option<PrivilegedAction>,
 ) -> BootTrafficReport {
     let mut missing = Vec::new();
     let mut limitations = Vec::new();
@@ -588,20 +630,8 @@ pub fn collect_boot_traffic(
     }
 
     if bin_exists("journalctl") {
-        match run_cmd_capture(
-            "journalctl",
-            &[
-                "-u",
-                "systemd-resolved",
-                "-b",
-                "--no-pager",
-                "-o",
-                "cat",
-                "-n",
-                "4000",
-            ],
-            Duration::from_secs(6),
-        ) {
+        let action = PrivilegedAction::JournalResolved;
+        match capture_maybe(action.bin(), action.args(), Duration::from_secs(6), elevate) {
             Ok(o)
                 if is_permission_output(&o) || o.stderr.to_ascii_lowercase().contains("d-bus") =>
             {
@@ -615,6 +645,10 @@ pub fn collect_boot_traffic(
                     );
                 }
                 domains.extend(rows);
+            }
+            Err(CoreError::Forbidden(msg)) => {
+                privilege = Some(privilege_hint("journalctl", "systemd-journal"));
+                limitations.push(msg);
             }
             Err(e) => limitations.push(e.to_string()),
         }
@@ -677,64 +711,55 @@ impl Default for TraceSession {
 }
 
 /// Corre traceroute/tracepath y llama `on_event` por cada hop (y al terminar).
+pub fn alloc_trace_session(destination: &str) -> Result<(String, String)> {
+    let dest = validate_host(destination)?;
+    Ok((dest.clone(), format!("{}-{}", now_ms(), dest)))
+}
+
 pub fn start_trace<F>(
     destination: &str,
     gateway: Option<&str>,
     cancel: Arc<AtomicBool>,
+    elevate: bool,
+    session_id: String,
     mut on_event: F,
 ) -> Result<()>
 where
     F: FnMut(TraceEvent),
 {
     let dest = validate_host(destination)?;
-    let session_id = format!("{}-{}", now_ms(), dest);
+    on_event(TraceEvent {
+        session_id: session_id.clone(),
+        kind: "start".into(),
+        hop: None,
+        message: Some(if elevate {
+            "Pidiendo permisos…".into()
+        } else {
+            "Trazando…".into()
+        }),
+        tool: None,
+        privilege: None,
+    });
+    if cancel.load(Ordering::Relaxed) {
+        on_event(TraceEvent {
+            session_id,
+            kind: "cancelled".into(),
+            hop: None,
+            message: Some("Ruta cancelada.".into()),
+            tool: None,
+            privilege: None,
+        });
+        return Ok(());
+    }
     let ipv6 = dest.parse::<std::net::Ipv6Addr>().is_ok();
 
-    // Ubuntu default: tracepath (UDP, sin CAP_NET_RAW). traceroute después.
-    let candidates: Vec<(&str, Vec<String>)> = if ipv6 {
-        vec![
-            ("tracepath", vec!["-6".into(), "-n".into()]),
-            ("tracepath6", vec!["-n".into()]),
-            (
-                "traceroute",
-                vec![
-                    "-6".into(),
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-            (
-                "traceroute6",
-                vec![
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-        ]
-    } else {
-        vec![
-            ("tracepath", vec!["-n".into()]),
-            (
-                "traceroute",
-                vec![
-                    "-n".into(),
-                    "-q".into(),
-                    "1".into(),
-                    "-w".into(),
-                    "2".into(),
-                ],
-            ),
-        ]
-    };
+    // Sin elevar: tracepath (UDP) y después traceroute.
+    // Elevado: un solo pkexec de traceroute (no segundo diálogo).
+    let candidates = trace_candidates(ipv6, elevate);
 
     let mut last_priv: Option<PrivilegeHint> = None;
     let mut last_missing = Vec::new();
+    let mut last_fail: Option<TraceFail> = None;
 
     for (bin, mut args) in candidates {
         if !bin_exists(bin) {
@@ -744,7 +769,13 @@ where
         args.push("--".into());
         args.push(dest.clone());
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        match spawn_allowed(bin, &arg_refs, Duration::from_secs(90)) {
+        let use_pkexec = elevate && is_traceroute_bin(bin);
+        let spawned = if use_pkexec {
+            Pkexec::spawn(bin, &arg_refs).map_err(|e| CoreError::Forbidden(e.user_message()))
+        } else {
+            spawn_allowed(bin, &arg_refs, Duration::from_secs(90))
+        };
+        match spawned {
             Ok(mut child) => {
                 on_event(TraceEvent {
                     session_id: session_id.clone(),
@@ -755,14 +786,13 @@ where
                     privilege: None,
                 });
                 let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
-                if let Some(err) = stderr {
+                let stderr_jh = child.stderr.take().map(|mut err| {
                     std::thread::spawn(move || {
                         let mut buf = Vec::new();
-                        let mut err = err;
                         let _ = err.read_to_end(&mut buf);
-                    });
-                }
+                        String::from_utf8_lossy(&buf).into_owned()
+                    })
+                });
                 let mut hops: Vec<TraceHop> = Vec::new();
                 if let Some(out) = stdout {
                     let reader = BufReader::new(out);
@@ -796,22 +826,72 @@ where
                     }
                 }
                 if cancel.load(Ordering::Relaxed) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    detach_child(child);
+                    // No join de stderr: el pipe puede seguir abierto (hijo root).
+                    drop(stderr_jh);
+                    let msg = if use_pkexec {
+                        format!("Ruta cancelada. {}", ElevateError::CANNOT_SIGNAL)
+                    } else {
+                        "Ruta cancelada.".into()
+                    };
                     on_event(TraceEvent {
                         session_id: session_id.clone(),
                         kind: "cancelled".into(),
                         hop: None,
-                        message: Some("Ruta cancelada.".into()),
+                        message: Some(msg),
                         tool: Some(bin.into()),
                         privilege: None,
                     });
                     return Ok(());
                 }
-                let status = child.wait();
-                let fail_perm = status.ok().is_some_and(|s| !s.success()) && hops.is_empty();
-                if fail_perm {
-                    last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
+                let status = reap_child(child, false);
+                let code = status.as_ref().and_then(|s| s.code());
+                let stderr_text = stderr_jh.and_then(|h| h.join().ok()).unwrap_or_default();
+                if use_pkexec && matches!(code, Some(126) | Some(127)) {
+                    let err = if code == Some(126) {
+                        ElevateError::Cancelled
+                    } else {
+                        ElevateError::AgentMissing
+                    };
+                    on_event(TraceEvent {
+                        session_id: session_id.clone(),
+                        kind: "error".into(),
+                        hop: None,
+                        message: Some(err.user_message()),
+                        tool: Some(bin.into()),
+                        privilege: Some(privilege_hint(bin, "CAP_NET_RAW")),
+                    });
+                    return Ok(());
+                }
+                if use_pkexec
+                    && matches!(code, Some(c) if c != 0 && c != 126 && c != 127)
+                    && !hops.is_empty()
+                {
+                    on_event(TraceEvent {
+                        session_id: session_id.clone(),
+                        kind: "done".into(),
+                        hop: None,
+                        message: Some(ElevateError::failed_message(
+                            code,
+                            &format!("Listo con {bin} (salida parcial). {}", stderr_text.trim()),
+                        )),
+                        tool: Some(bin.into()),
+                        privilege: None,
+                    });
+                    return Ok(());
+                }
+                // Sin hops: siguiente candidato sin un segundo pkexec.
+                if trace_try_next_candidate(hops.len()) {
+                    last_fail = Some(TraceFail {
+                        bin: bin.to_string(),
+                        code,
+                        stderr: stderr_text,
+                    });
+                    if let Some(hint) = privilege_if_elevated(use_pkexec, bin) {
+                        if status.is_some_and(|s| !s.success()) {
+                            last_priv = Some(hint);
+                        }
+                    }
                     continue;
                 }
                 on_event(TraceEvent {
@@ -825,12 +905,21 @@ where
                 return Ok(());
             }
             Err(CoreError::BinaryMissing(b)) => last_missing.push(b),
+            Err(CoreError::Forbidden(msg)) => {
+                on_event(TraceEvent {
+                    session_id: session_id.clone(),
+                    kind: "error".into(),
+                    hop: None,
+                    message: Some(msg),
+                    tool: Some(bin.into()),
+                    privilege: None,
+                });
+                return Ok(());
+            }
             Err(e) => {
-                last_priv = if is_permission_error(&e.to_string()) {
-                    Some(privilege_hint(bin, "CAP_NET_RAW"))
-                } else {
-                    last_priv
-                };
+                if use_pkexec && is_permission_error(&e.to_string()) {
+                    last_priv = Some(privilege_hint(bin, "CAP_NET_RAW"));
+                }
             }
         }
     }
@@ -840,21 +929,146 @@ where
             session_id,
             kind: "error".into(),
             hop: None,
-            message: Some(
-                if last_missing.len() == 4 || (!last_missing.is_empty() && last_priv.is_none()) {
-                    format!(
-                    "No está traceroute ni tracepath. En Ubuntu: sudo apt install traceroute iputils-tracepath. Faltan: {}",
-                    last_missing.join(", ")
-                )
-                } else {
-                    "No se pudo trazar la ruta con los binarios disponibles.".into()
-                },
-            ),
+            message: Some(trace_exhausted_message(
+                elevate,
+                &last_missing,
+                last_priv.is_some(),
+                last_fail.as_ref(),
+            )),
             tool: None,
-            privilege: last_priv,
+            privilege: if elevate { last_priv } else { None },
         });
     }
     Ok(())
+}
+
+fn is_traceroute_bin(bin: &str) -> bool {
+    matches!(bin, "traceroute" | "traceroute6")
+}
+
+/// `privilege` en el evento solo si el comando que falló corrió elevado.
+fn privilege_if_elevated(use_pkexec: bool, bin: &str) -> Option<PrivilegeHint> {
+    if use_pkexec {
+        Some(privilege_hint(bin, "CAP_NET_RAW"))
+    } else {
+        None
+    }
+}
+
+fn traceroute_flags(ipv6: bool) -> Vec<String> {
+    let mut args = Vec::new();
+    if ipv6 {
+        args.push("-6".into());
+    }
+    args.extend([
+        "-n".into(),
+        "-q".into(),
+        "1".into(),
+        "-w".into(),
+        "2".into(),
+    ]);
+    args
+}
+
+fn trace_candidates(ipv6: bool, elevate: bool) -> Vec<(&'static str, Vec<String>)> {
+    if elevate {
+        if ipv6 && !bin_exists("traceroute") && bin_exists("traceroute6") {
+            return vec![("traceroute6", traceroute_flags(false))];
+        }
+        return vec![("traceroute", traceroute_flags(ipv6))];
+    }
+    if ipv6 {
+        vec![
+            ("tracepath", vec!["-6".into(), "-n".into()]),
+            ("tracepath6", vec!["-n".into()]),
+            ("traceroute", traceroute_flags(true)),
+            ("traceroute6", traceroute_flags(false)),
+        ]
+    } else {
+        vec![
+            ("tracepath", vec!["-n".into()]),
+            ("traceroute", traceroute_flags(false)),
+        ]
+    }
+}
+
+struct TraceFail {
+    bin: String,
+    code: Option<i32>,
+    stderr: String,
+}
+
+fn trace_exhausted_message(
+    elevated: bool,
+    last_missing: &[String],
+    had_priv: bool,
+    last_fail: Option<&TraceFail>,
+) -> String {
+    if let Some(fail) = last_fail {
+        if elevated {
+            return ElevateError::failed_message(
+                fail.code,
+                &format!("{} no dio hops. {}", fail.bin, fail.stderr.trim()),
+            );
+        }
+        let code_s = fail
+            .code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "desconocido".into());
+        let stderr = fail.stderr.trim();
+        return if stderr.is_empty() {
+            format!("{} no dio hops (código {code_s}).", fail.bin)
+        } else {
+            format!("{} no dio hops (código {code_s}). {stderr}", fail.bin)
+        };
+    }
+    if last_missing.len() == 4 || (!last_missing.is_empty() && !had_priv) {
+        format!(
+            "No está traceroute ni tracepath. En Ubuntu: sudo apt install traceroute iputils-tracepath. Faltan: {}",
+            last_missing.join(", ")
+        )
+    } else {
+        "No se pudo trazar la ruta con los binarios disponibles.".into()
+    }
+}
+
+/// Sin hops hay que probar el siguiente binario (sin un segundo pkexec).
+fn trace_try_next_candidate(hops: usize) -> bool {
+    hops == 0
+}
+
+/// Mata el wrapper y espera en segundo plano. No bloquea el evento `cancelled`.
+fn detach_child(mut child: std::process::Child) {
+    let _ = child.kill();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// Espera al wrapper (`pkexec` o el binario). Si no reaparece, el `Child`
+/// se mueve a un hilo que hace `wait` (Drop no bloquea este hilo).
+fn reap_child(mut child: std::process::Child, kill: bool) -> Option<std::process::ExitStatus> {
+    if kill {
+        let _ = child.kill();
+    }
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    match child.try_wait() {
+        Ok(Some(status)) => Some(status),
+        _ => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            None
+        }
+    }
 }
 
 pub fn default_gateway() -> Option<String> {
@@ -1180,7 +1394,7 @@ mod tests {
     #[test]
     fn collect_connections_skips_conntrack() {
         let mut ptr = PtrCache::default();
-        let report = collect_connections(&mut ptr);
+        let report = collect_connections(&mut ptr, None);
         assert!(report.sources.iter().all(|s| !s.contains("conntrack")));
         assert!(report
             .notes
@@ -1201,5 +1415,320 @@ mod tests {
         assert_eq!(report.source.as_deref(), Some("fixture"));
         assert!(!report.rows[0].is_new);
         assert!(report.notes.iter().any(|n| n.contains("Foto inicial")));
+    }
+
+    #[test]
+    fn elevated_empty_tracepath_falls_back_to_next() {
+        assert!(trace_try_next_candidate(0));
+        assert!(!trace_try_next_candidate(1));
+    }
+
+    #[test]
+    fn elevated_candidates_are_one_traceroute() {
+        let v4 = trace_candidates(false, true);
+        assert_eq!(v4.len(), 1);
+        assert_eq!(v4[0].0, "traceroute");
+        assert_eq!(v4[0].1, vec!["-n", "-q", "1", "-w", "2"]);
+        let v6 = trace_candidates(true, true);
+        assert_eq!(v6.len(), 1);
+        assert!(v6[0].0 == "traceroute" || v6[0].0 == "traceroute6");
+    }
+
+    #[test]
+    fn traceroute_exhausted_shows_code_and_stderr() {
+        let elevated = trace_exhausted_message(
+            true,
+            &[],
+            false,
+            Some(&TraceFail {
+                bin: "traceroute".into(),
+                code: Some(1),
+                stderr: "send: Operation not permitted".into(),
+            }),
+        );
+        assert!(elevated.contains("El comando elevado falló"), "{elevated}");
+        assert!(elevated.contains("código 1"), "{elevated}");
+        assert!(
+            elevated.contains("send: Operation not permitted"),
+            "{elevated}"
+        );
+
+        let normal = trace_exhausted_message(
+            false,
+            &[],
+            false,
+            Some(&TraceFail {
+                bin: "traceroute".into(),
+                code: Some(0),
+                stderr: "no hops".into(),
+            }),
+        );
+        assert!(!normal.contains("El comando elevado falló"), "{normal}");
+        assert!(
+            normal.contains("traceroute no dio hops (código 0)"),
+            "{normal}"
+        );
+        assert!(normal.contains("no hops"), "{normal}");
+    }
+
+    #[test]
+    fn cancel_elevated_trace_does_not_wait_for_child() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+        crate::command::test_runner::set_spawn_slow_stderr(8);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let start = Instant::now();
+        let flag = cancel.clone();
+        let sink = kinds.clone();
+        start_trace(
+            "1.1.1.1",
+            None,
+            cancel,
+            true,
+            "test-cancel".into(),
+            move |ev| {
+                // Start con tool = ya se spawneó; el sleep de stderr ya arrancó.
+                if ev.kind == "start" && ev.tool.is_some() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                sink.lock().unwrap().push(ev.kind.clone());
+            },
+        )
+        .expect("start_trace");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "cancel esperó al child/stderr: {elapsed:?}"
+        );
+        let kinds = kinds.lock().unwrap().clone();
+        assert!(kinds.iter().any(|k| k == "cancelled"), "eventos: {kinds:?}");
+    }
+
+    #[test]
+    fn collect_firewall_nft_list_invokes_pkexec() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("nft", "/usr/sbin/nft");
+        crate::command::test_runner::set_capture_ok(
+            "table inet filter {\n\tchain input {\n\t\ttype filter hook input priority filter; policy accept;\n\t}\n}\n",
+        );
+        let report = collect_firewall(Some(PrivilegedAction::NftList));
+        assert_eq!(
+            crate::command::test_runner::take_argv(),
+            vec![vec![
+                "/usr/bin/pkexec".to_string(),
+                "/usr/sbin/nft".to_string(),
+                "list".to_string(),
+                "ruleset".to_string(),
+            ]],
+            "argv de pkexec nft (backend={:?} notes={:?})",
+            report.backend,
+            report.notes
+        );
+        assert_eq!(report.backend.as_deref(), Some("nft list ruleset"));
+    }
+
+    fn collect_events(dest: &str, elevate: bool, session_id: &str) -> Vec<TraceEvent> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        start_trace(dest, None, cancel, elevate, session_id.into(), move |ev| {
+            sink.lock().unwrap().push(ev)
+        })
+        .expect("start_trace");
+        let out = events.lock().unwrap().clone();
+        out
+    }
+
+    #[test]
+    fn privilege_only_when_command_ran_elevated() {
+        assert!(privilege_if_elevated(true, "traceroute").is_some());
+        assert!(privilege_if_elevated(false, "tracepath").is_none());
+        assert!(privilege_if_elevated(false, "traceroute").is_none());
+    }
+
+    #[test]
+    fn unelevated_nonzero_exit_has_no_privilege() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("tracepath", "/usr/bin/tracepath");
+        crate::command::test_runner::hide_bin("traceroute");
+        crate::command::test_runner::set_spawn_script(
+            "tracepath",
+            "printf 'send: network unreachable' >&2; exit 1",
+        );
+
+        let events = collect_events("1.1.1.1", false, "sid-unelev");
+        assert_eq!(events.first().map(|e| e.kind.as_str()), Some("start"));
+        assert_eq!(events[0].session_id, "sid-unelev");
+        let err = events
+            .iter()
+            .find(|e| e.kind == "error")
+            .expect("error de ruta");
+        assert_eq!(err.session_id, "sid-unelev");
+        assert!(err.privilege.is_none(), "{err:?}");
+        let msg = err.message.as_deref().unwrap_or("");
+        assert!(msg.contains("código 1"), "{msg}");
+        assert!(
+            !msg.contains("El comando elevado falló"),
+            "sin elevar no debe usar failed_message: {msg}"
+        );
+    }
+
+    #[test]
+    fn pkexec_missing_emits_error_on_known_session() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::hide_bin("pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+
+        let events = collect_events("1.1.1.1", true, "sid-pkexec");
+        assert_eq!(events[0].kind, "start");
+        assert_eq!(events[0].session_id, "sid-pkexec");
+        assert_eq!(events[0].message.as_deref(), Some("Pidiendo permisos…"));
+        let err = events
+            .iter()
+            .find(|e| e.kind == "error")
+            .expect("error pkexec_missing");
+        assert_eq!(err.session_id, "sid-pkexec");
+        assert_eq!(err.message.as_deref(), Some(ElevateError::PKEXEC_MISSING));
+        assert!(err.privilege.is_none(), "spawn no corrió elevado: {err:?}");
+    }
+
+    #[test]
+    fn elevated_pkexec_126_has_privilege() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+        crate::command::test_runner::set_spawn_script("pkexec", "exit 126");
+
+        let events = collect_events("1.1.1.1", true, "sid-126");
+        let err = events
+            .iter()
+            .find(|e| e.kind == "error")
+            .expect("error 126");
+        assert_eq!(err.message.as_deref(), Some(ElevateError::CANCELLED));
+        assert!(err.privilege.is_some(), "{err:?}");
+    }
+
+    #[test]
+    fn elevated_nonzero_no_hops_sets_privilege() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+        crate::command::test_runner::set_spawn_script(
+            "pkexec",
+            "printf 'send: Operation not permitted' >&2; exit 1",
+        );
+
+        let events = collect_events("1.1.1.1", true, "sid-elev-fail");
+        let err = events
+            .iter()
+            .find(|e| e.kind == "error")
+            .expect("error elevado");
+        assert!(err.privilege.is_some(), "{err:?}");
+        let msg = err.message.as_deref().unwrap_or("");
+        assert!(msg.contains("El comando elevado falló"), "{msg}");
+        assert!(msg.contains("código 1"), "{msg}");
+    }
+
+    #[test]
+    fn trace_event_paths_start_hop_done_cancelled() {
+        // start + hop + done, sin elevar
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("tracepath", "/usr/bin/tracepath");
+        crate::command::test_runner::hide_bin("traceroute");
+        crate::command::test_runner::set_spawn_script(
+            "tracepath",
+            "printf ' 1  1.1.1.1  1.000 ms\\n'; exit 0",
+        );
+        let events = collect_events("1.1.1.1", false, "sid-done");
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"start"), "{kinds:?}");
+        assert!(kinds.contains(&"hop"), "{kinds:?}");
+        assert!(kinds.contains(&"done"), "{kinds:?}");
+        assert!(events.iter().all(|e| e.session_id == "sid-done"));
+        assert!(events.iter().all(|e| e.privilege.is_none()));
+
+        // start + hop + done, elevado
+        crate::command::test_runner::unhide_bin("traceroute");
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+        crate::command::test_runner::set_spawn_script(
+            "pkexec",
+            "printf ' 1  1.1.1.1  1.000 ms\\n'; exit 0",
+        );
+        let events = collect_events("1.1.1.1", true, "sid-elev-done");
+        let kinds: Vec<_> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&"start"), "{kinds:?}");
+        assert!(kinds.contains(&"hop"), "{kinds:?}");
+        assert!(kinds.contains(&"done"), "{kinds:?}");
+        assert!(events.iter().all(|e| e.session_id == "sid-elev-done"));
+
+        // cancelled sin elevar
+        crate::command::test_runner::hide_bin("traceroute");
+        crate::command::test_runner::set_spawn_script(
+            "tracepath",
+            "sleep 8 >&2 & printf ' 1  1.1.1.1  1.000 ms\\n'; exec sleep 30",
+        );
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let cancel = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let flag = cancel.clone();
+        let sink = events.clone();
+        start_trace(
+            "1.1.1.1",
+            None,
+            cancel,
+            false,
+            "sid-cancel".into(),
+            move |ev| {
+                if ev.kind == "start" && ev.tool.is_some() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                sink.lock().unwrap().push(ev);
+            },
+        )
+        .expect("start_trace");
+        let events = events.lock().unwrap().clone();
+        assert!(
+            events.iter().any(|e| e.kind == "cancelled"),
+            "{:?}",
+            events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+        );
+        assert!(events.iter().all(|e| e.session_id == "sid-cancel"));
+        let cancelled = events.iter().find(|e| e.kind == "cancelled").unwrap();
+        assert_eq!(cancelled.message.as_deref(), Some("Ruta cancelada."));
+        assert!(cancelled.privilege.is_none());
+    }
+
+    #[test]
+    fn collect_firewall_missing_nft_does_not_elevate() {
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::hide_bin("nft");
+        let report = collect_firewall(Some(PrivilegedAction::NftList));
+        assert!(
+            crate::command::test_runner::take_argv().is_empty(),
+            "sin nft no se debe invocar pkexec"
+        );
+        assert!(report.missing.iter().any(|m| m == "nft"));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("No está `nft`") && n.contains("No se pidió contraseña")),
+            "{:?}",
+            report.notes
+        );
     }
 }

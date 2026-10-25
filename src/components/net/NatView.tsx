@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getClient } from "../../lib/client";
+import { useElevate } from "../../lib/elevate";
 import { formatCount, formatTimeout } from "../../lib/format";
 import type { NatReport } from "../../lib/types";
 import { StatCard } from "../StatCard";
@@ -9,6 +10,7 @@ import { TabHeader } from "./ExplainButton";
 export function NatView() {
   const [data, setData] = useState<NatReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { elevate, busy: elevateBusy, error: elevateError } = useElevate("nat", setData);
 
   const refresh = useCallback(async () => {
     try {
@@ -38,7 +40,14 @@ export function NatView() {
       ) : null}
       {data ? (
         <>
-          <Notes privilege={data.privilege} notes={data.notes} missing={data.missing} />
+          <Notes
+            privilege={data.privilege}
+            notes={data.notes}
+            missing={data.missing}
+            onElevate={data.privilege?.action ? () => void elevate(data.privilege!.action!) : undefined}
+            elevateBusy={elevateBusy}
+            elevateError={elevateError}
+          />
           <div className="grid gap-3 sm:grid-cols-3">
             <StatCard label="Traducciones activas" value={formatCount(data.active_count)} hint={data.source ?? "sin fuente"} />
             <StatCard label="SNAT" value={formatCount(data.snat_count)} hint="reescribe el origen (cómo te ven afuera)" />
