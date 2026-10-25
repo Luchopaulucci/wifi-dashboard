@@ -453,6 +453,14 @@ pub fn resolve_bin(name: &str) -> Result<PathBuf> {
     if !ALLOWED_BINS.contains(&name) {
         return Err(CoreError::CommandNotAllowed(name.to_string()));
     }
+    #[cfg(test)]
+    if test_runner::is_hidden(name) {
+        return Err(CoreError::BinaryMissing(name.to_string()));
+    }
+    #[cfg(test)]
+    if let Some(path) = test_runner::resolve_override(name) {
+        return Ok(path);
+    }
     for dir in BIN_DIRS {
         let candidate = Path::new(dir).join(name);
         if candidate.is_file() {
@@ -503,6 +511,10 @@ pub fn run_cmd_timeout(name: &str, args: &[&str], timeout: Duration) -> Result<S
 /// detectar "permission denied" vs reglas vacías vs traceroute con hops *).
 pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<CmdOutput> {
     ensure_args_allowed(name, args)?;
+    #[cfg(test)]
+    if let Some(out) = test_runner::capture_override(name, args) {
+        return Ok(out);
+    }
     let mut cmd = prepare_command(name, args)?;
 
     let output = wait_with_timeout(&mut cmd, timeout).map_err(|e| CoreError::CommandFailed {
@@ -611,6 +623,99 @@ fn wait_with_timeout(
         stdout,
         stderr,
     })
+}
+
+/// Runner inyectable solo en tests: no spawnea pkexec real.
+#[cfg(test)]
+pub mod test_runner {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static ENABLED: RefCell<bool> = const { RefCell::new(false) };
+        static RESOLVE: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
+        static HIDDEN: RefCell<std::collections::HashSet<String>> =
+            RefCell::new(std::collections::HashSet::new());
+        static REPLY: RefCell<Option<CmdOutput>> = const { RefCell::new(None) };
+        static ARGV: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub struct Guard;
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ENABLED.with(|e| *e.borrow_mut() = false);
+            RESOLVE.with(|m| m.borrow_mut().clear());
+            HIDDEN.with(|h| h.borrow_mut().clear());
+            REPLY.with(|r| *r.borrow_mut() = None);
+            ARGV.with(|a| a.borrow_mut().clear());
+        }
+    }
+
+    pub fn install() -> Guard {
+        ENABLED.with(|e| *e.borrow_mut() = true);
+        Guard
+    }
+
+    pub fn set_bin(name: &str, path: &str) {
+        RESOLVE.with(|m| {
+            m.borrow_mut().insert(name.to_string(), PathBuf::from(path));
+        });
+    }
+
+    pub fn hide_bin(name: &str) {
+        HIDDEN.with(|h| {
+            h.borrow_mut().insert(name.to_string());
+        });
+    }
+
+    pub(super) fn is_hidden(name: &str) -> bool {
+        ENABLED.with(|e| *e.borrow()) && HIDDEN.with(|h| h.borrow().contains(name))
+    }
+
+    pub fn set_capture_ok(stdout: &str) {
+        REPLY.with(|r| {
+            *r.borrow_mut() = Some(CmdOutput {
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                success: true,
+                code: Some(0),
+            });
+        });
+    }
+
+    pub fn take_argv() -> Vec<Vec<String>> {
+        ARGV.with(|a| std::mem::take(&mut *a.borrow_mut()))
+    }
+
+    pub(super) fn resolve_override(name: &str) -> Option<PathBuf> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        RESOLVE.with(|m| m.borrow().get(name).cloned())
+    }
+
+    pub(super) fn capture_override(name: &str, args: &[&str]) -> Option<CmdOutput> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        if name != "pkexec" {
+            return None;
+        }
+        let pkexec = resolve_override("pkexec").unwrap_or_else(|| PathBuf::from("/usr/bin/pkexec"));
+        let mut argv = vec![pkexec.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        ARGV.with(|a| a.borrow_mut().push(argv));
+        Some(REPLY.with(|r| {
+            r.borrow().clone().unwrap_or(CmdOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                success: true,
+                code: Some(0),
+            })
+        }))
+    }
 }
 
 #[cfg(test)]
