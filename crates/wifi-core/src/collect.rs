@@ -418,7 +418,7 @@ impl LanSweep {
         Ok(())
     }
 
-    pub fn merge_neighbors(devices: &mut Vec<LanDevice>, neighbors: Vec<LanDevice>) {
+    pub fn merge_neighbors(devices: &mut [LanDevice], neighbors: Vec<LanDevice>) {
         for neigh in neighbors {
             if !neighbor_is_live(&neigh.state) {
                 continue;
