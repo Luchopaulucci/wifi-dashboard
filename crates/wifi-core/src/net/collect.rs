@@ -1494,8 +1494,8 @@ mod tests {
             true,
             "test-cancel".into(),
             move |ev| {
-                // El start inicial no alcanza: hay que cancelar después del spawn.
-                if ev.kind == "hop" || ev.tool.is_some() {
+                // Start con tool = ya se spawneó; el sleep de stderr ya arrancó.
+                if ev.kind == "start" && ev.tool.is_some() {
                     flag.store(true, Ordering::Relaxed);
                 }
                 sink.lock().unwrap().push(ev.kind.clone());
@@ -1546,7 +1546,8 @@ mod tests {
             sink.lock().unwrap().push(ev)
         })
         .expect("start_trace");
-        events.lock().unwrap().clone()
+        let out = events.lock().unwrap().clone();
+        out
     }
 
     #[test]
@@ -1691,7 +1692,7 @@ mod tests {
             false,
             "sid-cancel".into(),
             move |ev| {
-                if ev.kind == "hop" || ev.tool.is_some() {
+                if ev.kind == "start" && ev.tool.is_some() {
                     flag.store(true, Ordering::Relaxed);
                 }
                 sink.lock().unwrap().push(ev);
