@@ -535,6 +535,10 @@ pub fn run_cmd_capture(name: &str, args: &[&str], timeout: Duration) -> Result<C
 /// hilo mata el proceso al vencerse el tiempo.
 pub fn spawn_allowed(name: &str, args: &[&str], timeout: Duration) -> Result<std::process::Child> {
     ensure_args_allowed(name, args)?;
+    #[cfg(test)]
+    if let Some(child) = test_runner::spawn_override(name, args) {
+        return child;
+    }
     let mut cmd = prepare_command(name, args)?;
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -631,6 +635,7 @@ pub mod test_runner {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::process::Command;
 
     thread_local! {
         static ENABLED: RefCell<bool> = const { RefCell::new(false) };
@@ -639,6 +644,7 @@ pub mod test_runner {
             RefCell::new(std::collections::HashSet::new());
         static REPLY: RefCell<Option<CmdOutput>> = const { RefCell::new(None) };
         static ARGV: RefCell<Vec<Vec<String>>> = const { RefCell::new(Vec::new()) };
+        static SLOW_STDERR: RefCell<Option<u64>> = const { RefCell::new(None) };
     }
 
     pub struct Guard;
@@ -650,6 +656,7 @@ pub mod test_runner {
             HIDDEN.with(|h| h.borrow_mut().clear());
             REPLY.with(|r| *r.borrow_mut() = None);
             ARGV.with(|a| a.borrow_mut().clear());
+            SLOW_STDERR.with(|s| *s.borrow_mut() = None);
         }
     }
 
@@ -687,6 +694,39 @@ pub mod test_runner {
 
     pub fn take_argv() -> Vec<Vec<String>> {
         ARGV.with(|a| std::mem::take(&mut *a.borrow_mut()))
+    }
+
+    /// Child que imprime un hop y deja stderr abierto `hold_secs` (nieto).
+    /// Matar al padre no cierra stderr: sirve para probar que cancel no hace join.
+    pub fn set_spawn_slow_stderr(hold_secs: u64) {
+        SLOW_STDERR.with(|s| *s.borrow_mut() = Some(hold_secs));
+    }
+
+    pub(super) fn spawn_override(name: &str, args: &[&str]) -> Option<Result<std::process::Child>> {
+        if !ENABLED.with(|e| *e.borrow()) {
+            return None;
+        }
+        let hold = SLOW_STDERR.with(|s| *s.borrow())?;
+        if name != "pkexec" {
+            return None;
+        }
+        let pkexec = resolve_override("pkexec").unwrap_or_else(|| PathBuf::from("/usr/bin/pkexec"));
+        let mut argv = vec![pkexec.to_string_lossy().into_owned()];
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        ARGV.with(|a| a.borrow_mut().push(argv));
+        let script = format!("printf ' 1  1.1.1.1  1.000 ms\\n'; sleep {hold} >&2 & exec sleep 30");
+        Some(
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|e| CoreError::CommandFailed {
+                    comando: name.to_string(),
+                    detalle: e.to_string(),
+                }),
+        )
     }
 
     pub(super) fn resolve_override(name: &str) -> Option<PathBuf> {

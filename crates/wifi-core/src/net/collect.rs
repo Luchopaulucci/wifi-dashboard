@@ -798,8 +798,9 @@ where
                     }
                 }
                 if cancel.load(Ordering::Relaxed) {
-                    let _ = reap_child(child, true);
-                    let _ = stderr_jh.and_then(|h| h.join().ok());
+                    detach_child(child);
+                    // No join de stderr: el pipe puede seguir abierto (hijo root).
+                    drop(stderr_jh);
                     let msg = if use_pkexec {
                         format!("Ruta cancelada. {}", ElevateError::CANNOT_SIGNAL)
                     } else {
@@ -901,6 +902,7 @@ where
             kind: "error".into(),
             hop: None,
             message: Some(trace_exhausted_message(
+                elevate,
                 &last_missing,
                 last_priv.is_some(),
                 last_fail.as_ref(),
@@ -960,15 +962,28 @@ struct TraceFail {
 }
 
 fn trace_exhausted_message(
+    elevated: bool,
     last_missing: &[String],
     had_priv: bool,
     last_fail: Option<&TraceFail>,
 ) -> String {
     if let Some(fail) = last_fail {
-        return ElevateError::failed_message(
-            fail.code,
-            &format!("{} no dio hops. {}", fail.bin, fail.stderr.trim()),
-        );
+        if elevated {
+            return ElevateError::failed_message(
+                fail.code,
+                &format!("{} no dio hops. {}", fail.bin, fail.stderr.trim()),
+            );
+        }
+        let code_s = fail
+            .code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "desconocido".into());
+        let stderr = fail.stderr.trim();
+        return if stderr.is_empty() {
+            format!("{} no dio hops (código {code_s}).", fail.bin)
+        } else {
+            format!("{} no dio hops (código {code_s}). {stderr}", fail.bin)
+        };
     }
     if last_missing.len() == 4 || (!last_missing.is_empty() && !had_priv) {
         format!(
@@ -983,6 +998,14 @@ fn trace_exhausted_message(
 /// Sin hops hay que probar el siguiente binario (sin un segundo pkexec).
 fn trace_try_next_candidate(hops: usize) -> bool {
     hops == 0
+}
+
+/// Mata el wrapper y espera en segundo plano. No bloquea el evento `cancelled`.
+fn detach_child(mut child: std::process::Child) {
+    let _ = child.kill();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// Espera al wrapper (`pkexec` o el binario). Si no reaparece, el `Child`
@@ -1376,7 +1399,8 @@ mod tests {
 
     #[test]
     fn traceroute_exhausted_shows_code_and_stderr() {
-        let msg = trace_exhausted_message(
+        let elevated = trace_exhausted_message(
+            true,
             &[],
             false,
             Some(&TraceFail {
@@ -1385,9 +1409,61 @@ mod tests {
                 stderr: "send: Operation not permitted".into(),
             }),
         );
-        assert!(msg.contains("código 1"), "{msg}");
-        assert!(msg.contains("send: Operation not permitted"), "{msg}");
-        assert!(msg.contains("traceroute"), "{msg}");
+        assert!(elevated.contains("El comando elevado falló"), "{elevated}");
+        assert!(elevated.contains("código 1"), "{elevated}");
+        assert!(
+            elevated.contains("send: Operation not permitted"),
+            "{elevated}"
+        );
+
+        let normal = trace_exhausted_message(
+            false,
+            &[],
+            false,
+            Some(&TraceFail {
+                bin: "traceroute".into(),
+                code: Some(0),
+                stderr: "no hops".into(),
+            }),
+        );
+        assert!(!normal.contains("El comando elevado falló"), "{normal}");
+        assert!(
+            normal.contains("traceroute no dio hops (código 0)"),
+            "{normal}"
+        );
+        assert!(normal.contains("no hops"), "{normal}");
+    }
+
+    #[test]
+    fn cancel_elevated_trace_does_not_wait_for_child() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        let _guard = crate::command::test_runner::install();
+        crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+        crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+        crate::command::test_runner::set_spawn_slow_stderr(8);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let kinds = Arc::new(Mutex::new(Vec::new()));
+        let start = Instant::now();
+        let flag = cancel.clone();
+        let sink = kinds.clone();
+        start_trace("1.1.1.1", None, cancel, true, move |ev| {
+            if ev.kind == "start" || ev.kind == "hop" {
+                flag.store(true, Ordering::Relaxed);
+            }
+            sink.lock().unwrap().push(ev.kind.clone());
+        })
+        .expect("start_trace");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "cancel esperó al child/stderr: {elapsed:?}"
+        );
+        let kinds = kinds.lock().unwrap().clone();
+        assert!(kinds.iter().any(|k| k == "cancelled"), "eventos: {kinds:?}");
     }
 
     #[test]
