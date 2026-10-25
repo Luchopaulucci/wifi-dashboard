@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { getClient } from "../../lib/client";
+import { PORTS_POLL_MS, TABLE_PAGE_SIZE, useSafePoll } from "../../lib/poll";
 import type { ListenersReport } from "../../lib/types";
 import { Notes } from "./Notes";
 import { TabHeader } from "./ExplainButton";
 
-export function PortsView() {
+export function PortsView({ pageSize = TABLE_PAGE_SIZE }: { pageSize?: number } = {}) {
   const [data, setData] = useState<ListenersReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [shown, setShown] = useState(pageSize);
 
   const refresh = useCallback(async () => {
     try {
@@ -18,11 +20,7 @@ export function PortsView() {
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    const id = window.setInterval(() => void refresh(), 4000);
-    return () => window.clearInterval(id);
-  }, [refresh]);
+  useSafePoll(refresh, PORTS_POLL_MS, true);
 
   const alerts = data?.alerts ?? [];
 
@@ -55,6 +53,11 @@ export function PortsView() {
       />
       {error ? (
         <p className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm">{error}</p>
+      ) : null}
+      {!data && !error ? (
+        <p className="font-ui text-sm text-slate-400" data-testid="ports-loading">
+          Cargando puertos…
+        </p>
       ) : null}
       {data ? <Notes notes={data.notes} missing={data.missing} /> : null}
       {alerts.length ? (
@@ -101,7 +104,7 @@ export function PortsView() {
             </tr>
           </thead>
           <tbody>
-            {(data?.rows ?? []).map((r) => (
+            {(data?.rows ?? []).slice(0, shown).map((r) => (
               <tr
                 key={r.key || `${r.protocol}-${r.local_ip}-${r.local_port}-${r.pid ?? ""}`}
                 className={`border-t border-white/5 ${r.is_new ? "bg-amber-400/10" : ""}`}
@@ -125,6 +128,18 @@ export function PortsView() {
             ))}
           </tbody>
         </table>
+        {(data?.rows.length ?? 0) > shown ? (
+          <div className="border-t border-white/5 px-4 py-3">
+            <button
+              type="button"
+              data-testid="show-more-ports"
+              className="rounded-full bg-white/10 px-4 py-1.5 font-ui text-sm text-slate-100 hover:bg-white/15"
+              onClick={() => setShown((n) => n + pageSize)}
+            >
+              Mostrar más ({(data?.rows.length ?? 0) - shown} restantes)
+            </button>
+          </div>
+        ) : null}
       </div>
     </section>
   );

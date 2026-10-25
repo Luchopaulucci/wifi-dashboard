@@ -11,4 +11,14 @@ describe("PortsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Descartar" }));
     expect(screen.queryByTestId("new-listener-alert")).toBeNull();
   });
+
+  it("pagina la tabla de listeners", async () => {
+    render(<PortsView pageSize={2} />);
+    expect(await screen.findByText("sshd")).toBeInTheDocument();
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+    fireEvent.click(screen.getByTestId("show-more-ports"));
+    expect(screen.getAllByRole("row")).toHaveLength(4);
+    expect(screen.getByText("cupsd")).toBeInTheDocument();
+  });
 });
+
