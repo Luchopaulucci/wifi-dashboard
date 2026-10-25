@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 export const CONNECTIONS_POLL_MS = 8_000;
 export const PORTS_POLL_MS = 8_000;
+export const SNAPSHOT_POLL_MS = 4_000;
 export const TABLE_PAGE_SIZE = 40;
 
 /** Un tick a la vez: si el anterior sigue, se salta. Pausa con la pestaña oculta. */

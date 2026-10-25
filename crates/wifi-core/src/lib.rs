@@ -17,7 +17,7 @@ pub mod types;
 
 pub use command::{bin_exists, run_cmd, validate_host, validate_iface, validate_ipv4};
 pub use congestion::{congestion_bars, overlaps_24};
-pub use engine::{AppCore, INTERNET_TARGETS};
+pub use engine::{AppCore, WifiView, INTERNET_TARGETS};
 pub use error::{CoreError, Result};
 pub use mock::MOCK_REASON;
 pub use parse::{

@@ -12,6 +12,7 @@ import { PortsView } from "./components/net/PortsView";
 import { RouteView } from "./components/net/RouteView";
 import { getClient } from "./lib/client";
 import { relativeAgo } from "./lib/format";
+import { SNAPSHOT_POLL_MS, useSafePoll } from "./lib/poll";
 import type { Snapshot, TabId } from "./lib/types";
 
 const WIFI_TABS: { id: TabId; label: string; hint: string }[] = [
@@ -104,15 +105,12 @@ export default function App() {
     }
   }, []);
 
+  useSafePoll(refresh, SNAPSHOT_POLL_MS);
+
   useEffect(() => {
-    void refresh();
-    const poll = window.setInterval(() => void refresh(), 4000);
     const clock = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => {
-      window.clearInterval(poll);
-      window.clearInterval(clock);
-    };
-  }, [refresh]);
+    return () => window.clearInterval(clock);
+  }, []);
 
   const onRescan = async () => {
     setBusy(true);

@@ -66,9 +66,24 @@ impl AsyncNet {
 }
 
 #[tauri::command]
-fn get_snapshot(state: tauri::State<AppState>) -> Result<Snapshot, String> {
+async fn get_snapshot(state: tauri::State<'_, AppState>) -> Result<Snapshot, String> {
+    let mock = {
+        let core = state.core.lock().map_err(|e| e.to_string())?;
+        core.is_mock()
+    };
+    if mock {
+        let mut core = state.core.lock().map_err(|e| e.to_string())?;
+        return core.snapshot().map_err(map_err);
+    }
+    let (cache, last_probe) = {
+        let core = state.core.lock().map_err(|e| e.to_string())?;
+        core.snapshot_inputs()
+    };
+    let view =
+        AsyncNet::blocking(move || AppCore::collect_view(cache, last_probe).map_err(map_err))
+            .await?;
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.snapshot().map_err(map_err)
+    core.finish_snapshot(view, None).map_err(map_err)
 }
 
 #[tauri::command]
@@ -91,8 +106,15 @@ async fn sweep_lan(state: tauri::State<'_, AppState>) -> Result<Snapshot, String
         .await
         .map_err(|e| e.to_string())?
         .map_err(map_err)?;
+    let (cache, last_probe) = {
+        let core = state.core.lock().map_err(|e| e.to_string())?;
+        core.snapshot_inputs()
+    };
+    let view =
+        AsyncNet::blocking(move || AppCore::collect_view(cache, last_probe).map_err(map_err))
+            .await?;
     let mut core = state.core.lock().map_err(|e| e.to_string())?;
-    core.snapshot_with_devices(devices).map_err(map_err)
+    core.finish_snapshot(view, Some(devices)).map_err(map_err)
 }
 
 #[tauri::command]
