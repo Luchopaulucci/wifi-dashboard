@@ -51,7 +51,7 @@ export function RouteView() {
           setStatus(ev.message ?? "Listo.");
         } else if (ev.kind === "cancelled") {
           setBusy(false);
-          setStatus("Cancelado.");
+          setStatus(ev.message ?? "Cancelado.");
         } else if (ev.kind === "error") {
           setBusy(false);
           setStatus(ev.message ?? "No se pudo trazar.");
@@ -163,6 +163,12 @@ export function RouteView() {
           >
             Cancelar
           </button>
+        ) : null}
+        {busy ? (
+          <p className="basis-full font-ui text-xs text-amber-200/80">
+            Cancelar solo deja de esperar. Un traceroute elevado corre como root: Señal no puede
+            mandarle una señal y puede seguir hasta que termine.
+          </p>
         ) : null}
         <p className="font-ui text-xs text-slate-500">
           {status}

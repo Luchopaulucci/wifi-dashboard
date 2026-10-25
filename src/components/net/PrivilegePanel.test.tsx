@@ -47,4 +47,17 @@ describe("PrivilegePanel", () => {
     expect(screen.getByTestId("privilege-elevate")).toBeDisabled();
     expect(screen.getByTestId("privilege-panel")).toHaveTextContent("Esperando contraseña");
   });
+
+  it("muestra aviso si pkexec falla con un código que no es 0/126/127", () => {
+    render(
+      <PrivilegePanel
+        hint={nftHint}
+        onElevate={() => undefined}
+        error="El comando elevado falló (código 1). No se cambió nada en el sistema. syntax error"
+      />,
+    );
+    expect(screen.getByTestId("privilege-error")).toHaveTextContent("El comando elevado falló");
+    expect(screen.getByTestId("privilege-error")).toHaveTextContent("código 1");
+    expect(screen.getByTestId("privilege-elevate")).toBeEnabled();
+  });
 });
