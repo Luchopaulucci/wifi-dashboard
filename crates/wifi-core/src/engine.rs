@@ -8,7 +8,7 @@ use crate::collect::{
 use crate::error::{CoreError, Result};
 use crate::mock;
 use crate::store::Store;
-use crate::types::{now_ms, HistoryPoint, HistoryRange, ProbeInstant, Snapshot};
+use crate::types::{now_ms, HistoryPoint, HistoryRange, LanDevice, ProbeInstant, Snapshot};
 
 pub const INTERNET_TARGETS: &[(&str, &str)] = &[
     ("1.1.1.1", "Internet (1.1.1.1)"),
@@ -81,16 +81,27 @@ impl AppCore {
         self.snapshot()
     }
 
+    pub fn collect_lan_sweep() -> Result<Vec<LanDevice>> {
+        let mut sources = Vec::new();
+        let live = collect_live(&mut sources)?;
+        collect_devices(&live, true)
+    }
+
+    pub fn snapshot_with_devices(&mut self, devices: Vec<LanDevice>) -> Result<Snapshot> {
+        if self.mock {
+            return Ok(mock::snapshot(&self.store));
+        }
+        let mut snap = self.snapshot()?;
+        snap.devices = devices;
+        Ok(snap)
+    }
+
     pub fn sweep_lan(&mut self) -> Result<Snapshot> {
         if self.mock {
             return Ok(mock::snapshot(&self.store));
         }
-        let mut sources = Vec::new();
-        let live = collect_live(&mut sources)?;
-        let devices = collect_devices(&live, true)?;
-        let mut snap = self.snapshot()?;
-        snap.devices = devices;
-        Ok(snap)
+        let devices = Self::collect_lan_sweep()?;
+        self.snapshot_with_devices(devices)
     }
 
     pub fn history(&self, target: &str, range: HistoryRange) -> Result<Vec<HistoryPoint>> {

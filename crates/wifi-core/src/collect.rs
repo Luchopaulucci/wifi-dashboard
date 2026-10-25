@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::command::{bin_exists, run_cmd, run_cmd_timeout, validate_iface, validate_ipv4};
@@ -255,7 +258,12 @@ pub fn collect_devices(live: &LiveWifi, do_sweep: bool) -> Result<Vec<LanDevice>
 
     if do_sweep {
         if let Some(net) = subnet {
-            sweep_own_subnet(&net, &mut devices)?;
+            LanSweep::apply(&net, &mut devices)?;
+            if let Ok(text) = run_cmd("ip", &["neigh", "show"]) {
+                let mut again = parse_ip_neigh(&text);
+                again.retain(|d| ip_in_subnet(&d.ip, &net));
+                LanSweep::merge_neighbors(&mut devices, again);
+            }
         }
     }
 
@@ -278,7 +286,7 @@ pub fn ping_target(ip: &str) -> Result<Option<f64>> {
         &["-c", "1", "-n", "-W", "1", ip],
         Duration::from_secs(3),
     ) {
-        Ok(text) => Ok(parse_ping_latency(&text)),
+        Ok(text) => Ok(LanSweep::latency_from_output(&text)),
         Err(_) => Ok(None),
     }
 }
@@ -346,6 +354,117 @@ pub fn connected_subnet(live: &LiveWifi) -> Option<Ipv4Subnet> {
     })
 }
 
+impl Ipv4Subnet {
+    fn host_ips(&self) -> Result<Vec<Ipv4Addr>> {
+        if self.prefix < 24 {
+            return Err(CoreError::Forbidden(
+                "el barrido solo se permite en la /24 conectada".into(),
+            ));
+        }
+        let host_bits = 32 - self.prefix;
+        let count = 1u32 << host_bits;
+        if count > 256 {
+            return Err(CoreError::Forbidden("rango demasiado grande".into()));
+        }
+        Ok((1..count.saturating_sub(1))
+            .map(|i| Ipv4Addr::from(self.network + i))
+            .collect())
+    }
+}
+
+/// Barrido de la /24 conectada: pings acotados en paralelo y merge de vecinos ARP.
+pub struct LanSweep;
+
+impl LanSweep {
+    const MAX_IN_FLIGHT: usize = 32;
+
+    pub fn apply(net: &Ipv4Subnet, devices: &mut Vec<LanDevice>) -> Result<()> {
+        let existing: HashSet<String> = devices.iter().map(|d| d.ip.clone()).collect();
+        let targets: Vec<String> = net
+            .host_ips()?
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .filter(|ip| !existing.contains(ip) && validate_ipv4(ip).is_ok())
+            .collect();
+        for ip in Self::ping_alive(&targets) {
+            devices.push(Self::device_from_ping(ip));
+        }
+        Ok(())
+    }
+
+    pub fn merge_neighbors(devices: &mut Vec<LanDevice>, neighbors: Vec<LanDevice>) {
+        for neigh in neighbors {
+            if let Some(existing) = devices.iter_mut().find(|d| d.ip == neigh.ip) {
+                if existing.mac.is_none() {
+                    existing.mac = neigh.mac;
+                }
+                if existing.iface.is_none() {
+                    existing.iface = neigh.iface;
+                }
+                if neigh.state != "UNKNOWN" {
+                    existing.state = neigh.state;
+                }
+            } else {
+                devices.push(neigh);
+            }
+        }
+    }
+
+    /// Un host está vivo si el output de ping trae `time=…`.
+    pub fn latency_from_output(text: &str) -> Option<f64> {
+        parse_ping_latency(text)
+    }
+
+    fn device_from_ping(ip: String) -> LanDevice {
+        LanDevice {
+            ip,
+            mac: None,
+            iface: None,
+            state: "PING".into(),
+            hostname: None,
+            vendor: None,
+            is_gateway: false,
+        }
+    }
+
+    fn ping_alive(ips: &[String]) -> Vec<String> {
+        if ips.is_empty() {
+            return Vec::new();
+        }
+        let (tx, rx) = mpsc::channel();
+        let mut in_flight = 0usize;
+        let mut alive = Vec::new();
+        let mut iter = ips.iter();
+        loop {
+            while in_flight < Self::MAX_IN_FLIGHT {
+                let Some(ip) = iter.next() else {
+                    break;
+                };
+                let ip = ip.clone();
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    let hit = ping_target(&ip).ok().flatten().is_some();
+                    let _ = tx.send(hit.then_some(ip));
+                });
+                in_flight += 1;
+            }
+            if in_flight == 0 {
+                break;
+            }
+            match rx.recv() {
+                Ok(maybe) => {
+                    in_flight -= 1;
+                    if let Some(ip) = maybe {
+                        alive.push(ip);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        alive
+    }
+}
+
 fn ip_in_subnet(ip: &str, net: &Ipv4Subnet) -> bool {
     let Ok(addr) = ip.parse::<Ipv4Addr>() else {
         return false;
@@ -363,45 +482,6 @@ fn is_private_ipv4(ip: &str) -> bool {
         return false;
     };
     addr.is_private()
-}
-
-fn sweep_own_subnet(net: &Ipv4Subnet, devices: &mut Vec<LanDevice>) -> Result<()> {
-    if net.prefix < 24 {
-        return Err(CoreError::Forbidden(
-            "el barrido solo se permite en la /24 conectada".into(),
-        ));
-    }
-    let host_bits = 32 - net.prefix;
-    let count = 1u32 << host_bits;
-    if count > 256 {
-        return Err(CoreError::Forbidden("rango demasiado grande".into()));
-    }
-    let existing: std::collections::HashSet<String> =
-        devices.iter().map(|d| d.ip.clone()).collect();
-    let mut found = Vec::new();
-    for i in 1..count.saturating_sub(1) {
-        let addr = Ipv4Addr::from(net.network + i);
-        let ip = addr.to_string();
-        if existing.contains(&ip) {
-            continue;
-        }
-        if validate_ipv4(&ip).is_err() {
-            continue;
-        }
-        if ping_target(&ip)?.is_some() {
-            found.push(LanDevice {
-                ip,
-                mac: None,
-                iface: None,
-                state: "PING".into(),
-                hostname: None,
-                vendor: None,
-                is_gateway: false,
-            });
-        }
-    }
-    devices.extend(found);
-    Ok(())
 }
 
 fn resolve_hostname(ip: &str) -> Option<String> {
@@ -457,5 +537,57 @@ mod tests {
         assert!(ip_in_subnet("192.168.10.1", &net));
         assert!(!ip_in_subnet("192.168.11.1", &net));
         assert!(!ip_in_subnet("10.0.0.1", &net));
+    }
+
+    #[test]
+    fn sweep_hosts_only_connected_slash24() {
+        let net = Ipv4Subnet {
+            network: u32::from(Ipv4Addr::new(192, 168, 10, 0)),
+            prefix: 24,
+        };
+        let ips = net.host_ips().unwrap();
+        assert_eq!(ips.len(), 254);
+        assert_eq!(ips[0], Ipv4Addr::new(192, 168, 10, 1));
+        assert_eq!(*ips.last().unwrap(), Ipv4Addr::new(192, 168, 10, 254));
+    }
+
+    #[test]
+    fn sweep_rejects_larger_than_slash24() {
+        let net = Ipv4Subnet {
+            network: u32::from(Ipv4Addr::new(192, 168, 0, 0)),
+            prefix: 16,
+        };
+        assert!(net.host_ips().is_err());
+    }
+
+    #[test]
+    fn ping_output_parsing_alive_and_loss() {
+        let dir = format!("{}/tests/fixtures", env!("CARGO_MANIFEST_DIR"));
+        let ok = std::fs::read_to_string(format!("{dir}/ping.txt")).unwrap();
+        let loss = std::fs::read_to_string(format!("{dir}/ping_loss.txt")).unwrap();
+        assert_eq!(LanSweep::latency_from_output(&ok), Some(18.312));
+        assert_eq!(LanSweep::latency_from_output(&loss), None);
+    }
+
+    #[test]
+    fn merge_neighbors_keeps_ping_hosts_and_arp_macs() {
+        let mut devices = vec![LanDevice {
+            ip: "192.168.0.18".into(),
+            mac: None,
+            iface: None,
+            state: "PING".into(),
+            hostname: None,
+            vendor: None,
+            is_gateway: false,
+        }];
+        let path = format!("{}/tests/fixtures/ip_neigh.txt", env!("CARGO_MANIFEST_DIR"));
+        let neigh = parse_ip_neigh(&std::fs::read_to_string(path).unwrap());
+        LanSweep::merge_neighbors(&mut devices, neigh);
+        let stale = devices.iter().find(|d| d.ip == "192.168.0.18").unwrap();
+        assert_eq!(stale.mac.as_deref(), Some("f8:a4:5f:aa:bb:cc"));
+        assert_eq!(stale.state, "STALE");
+        assert!(devices.iter().any(|d| d.ip == "192.168.0.1"));
+        assert!(devices.iter().any(|d| d.ip == "192.168.0.40"));
+        assert!(!devices.iter().any(|d| d.ip == "192.168.0.99"));
     }
 }
