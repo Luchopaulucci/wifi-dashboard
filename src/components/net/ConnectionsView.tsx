@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getClient } from "../../lib/client";
+import { CONNECTIONS_POLL_MS, TABLE_PAGE_SIZE, useSafePoll } from "../../lib/poll";
 import type { ConnectionRow, ConnectionsReport, GeoInfo } from "../../lib/types";
 import { GeoOptIn } from "./GeoOptIn";
 import { Notes } from "./Notes";
@@ -23,10 +24,11 @@ function isProbablyPrivate(ip: string): boolean {
   );
 }
 
-export function ConnectionsView() {
+export function ConnectionsView({ pageSize = TABLE_PAGE_SIZE }: { pageSize?: number } = {}) {
   const [data, setData] = useState<ConnectionsReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [shown, setShown] = useState(pageSize);
   const [auto, setAuto] = useState(true);
   const [selected, setSelected] = useState<ConnectionRow | null>(null);
   const [geo, setGeo] = useState<GeoInfo | null>(null);
@@ -44,21 +46,19 @@ export function ConnectionsView() {
     }
   }, []);
 
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  useSafePoll(refresh, CONNECTIONS_POLL_MS, auto);
 
   useEffect(() => {
-    if (!auto) return;
-    const id = window.setInterval(() => void refresh(), 3000);
-    return () => window.clearInterval(id);
-  }, [auto, refresh]);
+    setShown(pageSize);
+  }, [filter, pageSize]);
 
   const rows = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q || !data) return data?.rows ?? [];
     return data.rows.filter((r) => (r.process ?? "").toLowerCase().includes(q));
   }, [data, filter]);
+
+  const visible = rows.slice(0, shown);
 
   const onSelect = async (row: ConnectionRow) => {
     setSelected(row);
@@ -103,6 +103,11 @@ export function ConnectionsView() {
       {error ? (
         <p className="rounded-xl border border-rose-400/30 bg-rose-400/10 px-3 py-2 text-sm">{error}</p>
       ) : null}
+      {!data && !error ? (
+        <p className="font-ui text-sm text-slate-400" data-testid="connections-loading">
+          Cargando conexiones…
+        </p>
+      ) : null}
       {data ? (
         <Notes privilege={data.privilege} notes={data.notes} missing={data.missing} />
       ) : null}
@@ -133,7 +138,7 @@ export function ConnectionsView() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r, i) => {
+              {visible.map((r, i) => {
                 const key = `${r.protocol}-${r.local_ip}:${r.local_port}-${r.remote_ip}:${r.remote_port}-${r.pid ?? i}`;
                 const active =
                   selected &&
@@ -171,6 +176,18 @@ export function ConnectionsView() {
               })}
             </tbody>
           </table>
+          {rows.length > shown ? (
+            <div className="border-t border-white/5 px-4 py-3">
+              <button
+                type="button"
+                data-testid="show-more-connections"
+                className="rounded-full bg-white/10 px-4 py-1.5 font-ui text-sm text-slate-100 hover:bg-white/15"
+                onClick={() => setShown((n) => n + pageSize)}
+              >
+                Mostrar más ({rows.length - shown} restantes)
+              </button>
+            </div>
+          ) : null}
         </div>
         <aside className="card rounded-2xl p-4">
           <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Detalle</p>

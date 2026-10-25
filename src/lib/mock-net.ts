@@ -64,6 +64,18 @@ export function mockConnections(): ConnectionsReport {
         domain: "github.com",
         domain_source: "DNS inverso (PTR)",
       },
+      ...Array.from({ length: 42 }, (_, i) => ({
+        protocol: "tcp",
+        local_ip: "192.168.0.24",
+        local_port: String(41000 + i),
+        remote_ip: "1.1.1.1",
+        remote_port: "443",
+        state: "ESTABLISHED",
+        process: `worker-${i}`,
+        pid: 7000 + i,
+        domain: null,
+        domain_source: null,
+      })),
     ],
   };
 }
@@ -342,6 +354,17 @@ export function mockListeners(): ListenersReport {
         key: "tcp|192.168.0.24|8080|python3",
         is_new: true,
       },
+      ...Array.from({ length: 42 }, (_, i) => ({
+        protocol: "tcp",
+        local_ip: "127.0.0.1",
+        local_port: String(9000 + i),
+        process: `svc-${i}`,
+        pid: 8000 + i,
+        reach: "local_only" as const,
+        reach_label: "solo local (127.0.0.1 / ::1)",
+        key: `tcp|127.0.0.1|${9000 + i}|svc-${i}`,
+        is_new: false,
+      })),
     ],
   };
 }

@@ -22,7 +22,7 @@ pub use collect::{
     apply_listener_session, collect_boot_traffic, collect_connections, collect_firewall,
     collect_listeners, collect_nat, default_gateway, ingest_monitor_line, listener_keys,
     lookup_ptr, monitor_rows, remember_dns_talker, spawn_dns_monitor, start_trace, GeoCache,
-    ListenerSession, PtrCache, TraceSession,
+    ListenerScan, ListenerSession, PtrCache, TraceSession,
 };
 pub use conntrack::parse_conntrack;
 pub use criollo::explain_rule_criollo;

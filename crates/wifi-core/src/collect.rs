@@ -19,7 +19,7 @@ use crate::types::{LanDevice, LiveWifi, NearbyNetwork};
 
 const RESCAN_MIN_INTERVAL: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CollectCache {
     last_rescan: Option<Instant>,
     nearby: Vec<NearbyNetwork>,
