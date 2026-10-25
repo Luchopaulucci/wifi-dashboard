@@ -193,6 +193,11 @@ pub fn parse_proc_wireless(text: &str, iface: Option<&str>) -> Option<(String, i
     None
 }
 
+/// FAILED e INCOMPLETE no son prueba de vida: el kernel los crea al sondear.
+pub fn neighbor_is_live(state: &str) -> bool {
+    !matches!(state, "FAILED" | "INCOMPLETE")
+}
+
 pub fn parse_ip_neigh(text: &str) -> Vec<LanDevice> {
     let mut out = Vec::new();
     for raw in text.lines() {
@@ -230,7 +235,7 @@ pub fn parse_ip_neigh(text: &str) -> Vec<LanDevice> {
                 _ => i += 1,
             }
         }
-        if state == "FAILED" && mac.is_none() {
+        if !neighbor_is_live(&state) {
             continue;
         }
         out.push(LanDevice {

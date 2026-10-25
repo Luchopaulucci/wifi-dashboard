@@ -61,16 +61,23 @@ fn generic_hint(binary: &str, capability: &str) -> PrivilegeHint {
             "Señal no corre como root. El comando `{binary}` pidió privilegios ({capability}). No vamos a ejecutarlo con sudo ni a cambiar el sistema."
         )
     };
-    let commands = if cap.contains("net_admin") {
-        vec![
+    let commands = match binary {
+        "ss" => vec![
+            "# una sola vez, solo lectura, en una terminal tuya:".into(),
+            "sudo ss -tunap".into(),
+        ],
+        "tracepath" | "tracepath6" => vec![
+            "# una sola vez, en una terminal tuya (Señal no lo ejecuta):".into(),
+            format!("sudo {binary} -n <destino>"),
+        ],
+        _ if cap.contains("net_admin") => vec![
             "# una sola vez, solo lectura, en una terminal tuya:".into(),
             format!("sudo {binary}"),
-        ]
-    } else {
-        vec![
+        ],
+        _ => vec![
             "# una sola vez, en una terminal tuya (Señal no lo ejecuta):".into(),
             format!("sudo {binary}"),
-        ]
+        ],
     };
     PrivilegeHint {
         binary: binary.to_string(),
@@ -207,5 +214,18 @@ mod tests {
         assert!(nft.commands.iter().any(|c| c == "sudo nft list ruleset"));
         let ct = privilege_hint("conntrack", "CAP_NET_ADMIN");
         assert!(ct.commands.iter().any(|c| c == "sudo conntrack -L"));
+    }
+
+    #[test]
+    fn ss_and_tracepath_hints_include_args() {
+        let ss = privilege_hint("ss", "CAP_NET_ADMIN");
+        assert!(ss.commands.iter().any(|c| c == "sudo ss -tunap"));
+        assert!(!ss.commands.iter().any(|c| c == "sudo ss"));
+        let tp = privilege_hint("tracepath", "CAP_NET_RAW");
+        assert!(tp
+            .commands
+            .iter()
+            .any(|c| c.contains("tracepath -n <destino>")));
+        assert!(!tp.commands.iter().any(|c| c == "sudo tracepath"));
     }
 }
