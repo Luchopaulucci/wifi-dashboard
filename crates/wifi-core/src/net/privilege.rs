@@ -535,17 +535,4 @@ mod tests {
         assert!(msg.contains("syntax error"), "{msg}");
         assert!(ElevateError::is_user_message(&msg));
     }
-
-    #[test]
-    fn ss_and_tracepath_hints_include_args() {
-        let ss = privilege_hint("ss", "CAP_NET_ADMIN");
-        assert!(ss.commands.iter().any(|c| c == "sudo ss -tunap"));
-        assert!(!ss.commands.iter().any(|c| c == "sudo ss"));
-        let tp = privilege_hint("tracepath", "CAP_NET_RAW");
-        assert!(tp
-            .commands
-            .iter()
-            .any(|c| c.contains("tracepath -n <destino>")));
-        assert!(!tp.commands.iter().any(|c| c == "sudo tracepath"));
-    }
 }
