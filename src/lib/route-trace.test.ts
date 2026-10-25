@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { applyTraceEvent, beginRouteSession, emptyRouteTraceState } from "./route-trace";
+import {
+  applyTraceEvent,
+  beginRouteSession,
+  bindRouteSession,
+  emptyRouteTraceState,
+} from "./route-trace";
 import type { TraceEvent, TraceHop } from "./types";
 
 function ev(partial: Partial<TraceEvent> & Pick<TraceEvent, "session_id" | "kind">): TraceEvent {
@@ -68,5 +73,51 @@ describe("applyTraceEvent", () => {
     expect(state.busy).toBe(false);
     expect(state.status).toBe("tracepath no dio hops (código 0).");
     expect(state.elevateError).toBeNull();
+  });
+
+  it("pkexec_missing sin start no deja busy trabado si el front fija el session_id", () => {
+    const pkexecMissing =
+      "No está `pkexec`. En Ubuntu: sudo apt install policykit-1. Señal no corre como root.";
+    let state = beginRouteSession(emptyRouteTraceState(), "Pidiendo permisos…");
+    expect(state.busy).toBe(true);
+    expect(state.sessionId).toBeNull();
+    expect(state.status).toBe("Pidiendo permisos…");
+
+    const dropped = applyTraceEvent(
+      state,
+      ev({ session_id: "s-pkexec", kind: "error", message: pkexecMissing }),
+    );
+    expect(dropped.busy).toBe(true);
+    expect(dropped.status).toBe("Pidiendo permisos…");
+
+    state = bindRouteSession(state, "s-pkexec");
+    state = applyTraceEvent(
+      state,
+      ev({ session_id: "s-pkexec", kind: "error", message: pkexecMissing }),
+    );
+    expect(state.busy).toBe(false);
+    expect(state.status).toBe(pkexecMissing);
+    expect(state.elevateError).toBeNull();
+  });
+
+  it("una ruta sin elevar con código distinto de 0 no llena elevateError", () => {
+    let state = beginRouteSession(emptyRouteTraceState(), "Trazando…");
+    state = bindRouteSession(state, "s-unelev");
+    state = applyTraceEvent(
+      state,
+      ev({ session_id: "s-unelev", kind: "start", message: "Trazando…" }),
+    );
+    state = applyTraceEvent(
+      state,
+      ev({
+        session_id: "s-unelev",
+        kind: "error",
+        message: "tracepath no dio hops (código 1). send: network unreachable",
+      }),
+    );
+    expect(state.busy).toBe(false);
+    expect(state.status).toBe("tracepath no dio hops (código 1). send: network unreachable");
+    expect(state.elevateError).toBeNull();
+    expect(state.privilege).toBeNull();
   });
 });

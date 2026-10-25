@@ -34,6 +34,11 @@ export function beginRouteSession(state: RouteTraceState, status: string): Route
   };
 }
 
+/** Fija el session_id que devolvió `start_trace_route` antes de aplicar eventos. */
+export function bindRouteSession(state: RouteTraceState, sessionId: string): RouteTraceState {
+  return { ...state, sessionId };
+}
+
 export function applyTraceEvent(state: RouteTraceState, ev: TraceEvent): RouteTraceState {
   if (ev.kind === "start") {
     return {

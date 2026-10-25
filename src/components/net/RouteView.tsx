@@ -4,10 +4,11 @@ import { formatMs } from "../../lib/format";
 import {
   applyTraceEvent,
   beginRouteSession,
+  bindRouteSession,
   emptyRouteTraceState,
   type RouteTraceState,
 } from "../../lib/route-trace";
-import type { GeoInfo } from "../../lib/types";
+import type { GeoInfo, TraceEvent } from "../../lib/types";
 import { GeoOptIn } from "./GeoOptIn";
 import { Notes } from "./Notes";
 import { TabHeader } from "./ExplainButton";
@@ -27,8 +28,26 @@ export function RouteView() {
   const [trace, setTrace] = useState<RouteTraceState>(() => emptyRouteTraceState());
   const traceRef = useRef(trace);
   traceRef.current = trace;
+  const pendingRef = useRef<TraceEvent[]>([]);
+  const holdRef = useRef(false);
   const [ispGeo, setIspGeo] = useState<GeoInfo | null>(null);
   const [geoEnabled, setGeoEnabled] = useState(false);
+
+  const flushBoundSession = (sessionId: string) => {
+    let next = bindRouteSession(traceRef.current, sessionId);
+    traceRef.current = next;
+    holdRef.current = false;
+    const queued = pendingRef.current;
+    pendingRef.current = [];
+    for (const ev of queued) {
+      next = applyTraceEvent(next, ev);
+    }
+    traceRef.current = next;
+    setTrace(next);
+    if (queued.some((ev) => ev.kind === "start" && next.sessionId === ev.session_id)) {
+      setIspGeo(null);
+    }
+  };
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -36,6 +55,10 @@ export function RouteView() {
     (async () => {
       const client = await getClient();
       unlisten = await client.onTrace((ev) => {
+        if (holdRef.current && traceRef.current.sessionId == null) {
+          pendingRef.current.push(ev);
+          return;
+        }
         const next = applyTraceEvent(traceRef.current, ev);
         traceRef.current = next;
         setTrace(next);
@@ -70,13 +93,18 @@ export function RouteView() {
   }, [trace.hops, geoEnabled]);
 
   const onElevate = async () => {
-    const next = beginRouteSession(traceRef.current, "Trazando con permisos…");
+    holdRef.current = true;
+    pendingRef.current = [];
+    const next = beginRouteSession(traceRef.current, "Pidiendo permisos…");
     traceRef.current = next;
     setTrace(next);
     try {
       const client = await getClient();
-      await client.startTrace(dest.trim(), true);
+      const sessionId = await client.startTrace(dest.trim(), true);
+      flushBoundSession(sessionId);
     } catch (err) {
+      holdRef.current = false;
+      pendingRef.current = [];
       setTrace((prev) => ({
         ...prev,
         busy: false,
@@ -86,6 +114,8 @@ export function RouteView() {
   };
 
   const onGo = async () => {
+    holdRef.current = true;
+    pendingRef.current = [];
     const next = beginRouteSession(
       { ...traceRef.current, privilege: null },
       "Trazando…",
@@ -94,8 +124,11 @@ export function RouteView() {
     setTrace(next);
     try {
       const client = await getClient();
-      await client.startTrace(dest.trim());
+      const sessionId = await client.startTrace(dest.trim());
+      flushBoundSession(sessionId);
     } catch (err) {
+      holdRef.current = false;
+      pendingRef.current = [];
       setTrace((prev) => ({
         ...prev,
         busy: false,

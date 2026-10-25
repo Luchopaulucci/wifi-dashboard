@@ -35,7 +35,7 @@ export interface DashboardClient {
   listeners(): Promise<ListenersReport>;
   dismissListener(key: string): Promise<void>;
   lookupIp(ip: string, allowExternal: boolean): Promise<GeoInfo>;
-  startTrace(destination: string, elevated?: boolean): Promise<void>;
+  startTrace(destination: string, elevated?: boolean): Promise<string>;
   cancelTrace(): Promise<void>;
   onTrace(cb: (ev: TraceEvent) => void): Promise<() => void>;
   runPrivileged(action: PrivilegedAction): Promise<PrivilegedReport>;
@@ -104,6 +104,7 @@ function mockClient(): DashboardClient {
     async startTrace(destination) {
       if (traceTimer != null) window.clearTimeout(traceTimer);
       const events = mockTraceEvents(destination);
+      const sessionId = events[0]?.session_id ?? "mock";
       let i = 0;
       const tick = () => {
         const ev = events[i];
@@ -115,6 +116,7 @@ function mockClient(): DashboardClient {
         }
       };
       tick();
+      return sessionId;
     },
     async runPrivileged(action) {
       if (action === "nft_list" || action === "iptables_save" || action === "iptables_list") {
@@ -161,7 +163,7 @@ async function tauriClient(): Promise<DashboardClient> {
     lookupIp: (ip, allowExternal) =>
       invoke<GeoInfo>("lookup_remote_ip", { ip, allowExternal }),
     startTrace: (destination, elevated) =>
-      invoke("start_trace_route", { destination, elevated: elevated ?? false }),
+      invoke<string>("start_trace_route", { destination, elevated: elevated ?? false }),
     runPrivileged: (action) => invoke<PrivilegedReport>("run_privileged", { action }),
     cancelTrace: () => invoke("cancel_trace_route"),
     onTrace: async (cb) => {
