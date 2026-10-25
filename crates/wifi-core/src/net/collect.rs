@@ -32,7 +32,7 @@ use super::types::{
     TraceHop, TrafficCounter,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PtrCache {
     map: HashMap<String, Option<String>>,
     /// dest IP → nombre visto en respuestas DNS (cache resolved / journal)
@@ -58,26 +58,76 @@ impl PtrCache {
             _ => None,
         }
     }
+
+    pub fn decorate_rows(&self, rows: &mut [ConnectionRow]) {
+        for row in rows.iter_mut() {
+            if let Some((dom, src)) = self.lookup_cached(&row.remote_ip) {
+                row.domain = Some(dom);
+                row.domain_source = Some(src);
+            }
+        }
+    }
+
+    pub fn mark_non_public(&mut self, rows: &[ConnectionRow]) {
+        for row in rows {
+            if self.from_dns.contains_key(&row.remote_ip) || self.map.contains_key(&row.remote_ip) {
+                continue;
+            }
+            if parse_ip_opt(&row.remote_ip).is_some_and(|ip| !is_public_ip(ip)) {
+                self.map.insert(row.remote_ip.clone(), None);
+            }
+        }
+    }
+
+    pub fn pending_public_ips(&self, rows: &[ConnectionRow], budget: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            if out.len() >= budget {
+                break;
+            }
+            if !seen.insert(row.remote_ip.clone()) {
+                continue;
+            }
+            if self.from_dns.contains_key(&row.remote_ip) || self.map.contains_key(&row.remote_ip) {
+                continue;
+            }
+            if parse_ip_opt(&row.remote_ip).is_some_and(is_public_ip) {
+                out.push(row.remote_ip.clone());
+            }
+        }
+        out
+    }
+
+    /// DNS inverso sin tocar el caché. El caller guarda el resultado después.
+    pub fn lookup_addr(ip: &str) -> Option<String> {
+        let parsed = parse_ip_opt(ip)?;
+        if !is_public_ip(parsed) {
+            return None;
+        }
+        dns_lookup::lookup_addr(&parsed).ok()
+    }
+
+    pub fn remember(&mut self, ip: String, name: Option<String>) {
+        self.map.insert(ip, name);
+    }
+
+    pub fn absorb(&mut self, other: PtrCache) {
+        for (k, v) in other.map {
+            self.map.entry(k).or_insert(v);
+        }
+        for (k, v) in other.from_dns {
+            self.from_dns.entry(k).or_insert(v);
+        }
+    }
 }
 
-pub fn lookup_ptr(cache: &mut PtrCache, ip: &str) -> Option<String> {
+/// Solo lectura del caché. El DNS inverso va por `PtrCache::lookup_addr`.
+pub fn lookup_ptr(cache: &PtrCache, ip: &str) -> Option<String> {
     if let Some(name) = cache.from_dns.get(ip) {
         return Some(name.clone());
     }
-    if let Some(hit) = cache.map.get(ip) {
-        return hit.clone();
-    }
-    let parsed = parse_ip_opt(ip)?;
-    if !is_public_ip(parsed) {
-        cache.map.insert(ip.to_string(), None);
-        return None;
-    }
-    let name = std::thread::spawn(move || dns_lookup::lookup_addr(&parsed).ok())
-        .join()
-        .ok()
-        .flatten();
-    cache.map.insert(ip.to_string(), name.clone());
-    name
+    cache.map.get(ip).cloned().flatten()
 }
 
 #[derive(Default)]
@@ -117,10 +167,67 @@ pub struct ListenerSession {
     alerts: HashMap<String, ListenerRow>,
 }
 
+#[derive(Debug, Default)]
+pub struct ListenerScan {
+    pub rows: Vec<ListenerRow>,
+    pub source: Option<String>,
+    pub missing: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 impl ListenerSession {
     pub fn dismiss(&mut self, key: &str) {
         self.dismissed.insert(key.to_string());
         self.alerts.remove(key);
+    }
+
+    /// `ss` sin tocar la sesión: el lock de alertas no cubre el comando.
+    pub fn collect_rows() -> ListenerScan {
+        let mut scan = ListenerScan::default();
+
+        if bin_exists("ss") {
+            let text = match run_cmd_capture("ss", &["-H", "-tulpn"], Duration::from_secs(5)) {
+                Ok(o) if o.stdout.trim().is_empty() => {
+                    run_cmd_capture("ss", &["-tulpn"], Duration::from_secs(5))
+                        .map(|x| x.stdout)
+                        .unwrap_or_default()
+                }
+                Ok(o) => o.stdout,
+                Err(CoreError::BinaryMissing(b)) => {
+                    scan.missing.push(b);
+                    String::new()
+                }
+                Err(e) => {
+                    scan.notes.push(e.to_string());
+                    String::new()
+                }
+            };
+            if !text.is_empty() {
+                scan.rows = parse_ss_listeners(&text);
+                scan.source = Some("ss -tulpn".into());
+            }
+        } else {
+            scan.missing.push("ss".into());
+            scan.notes.push("Falta `ss` (iproute2).".into());
+        }
+        scan
+    }
+
+    pub fn finish_report(&mut self, scan: ListenerScan) -> ListenersReport {
+        let (rows, extra_notes) = apply_listener_session(self, scan.rows);
+        let mut notes = scan.notes;
+        notes.extend(extra_notes);
+        let alerts: Vec<ListenerRow> = self.alerts.values().cloned().collect();
+        let new_count = alerts.len() as u64;
+        ListenersReport {
+            collected_at_ms: now_ms(),
+            rows,
+            alerts,
+            new_count,
+            source: scan.source,
+            missing: scan.missing,
+            notes,
+        }
     }
 }
 
@@ -213,43 +320,9 @@ pub fn collect_connections(ptr: &mut PtrCache) -> ConnectionsReport {
         notes.push("Falta iproute2 (`ss`). En Ubuntu: sudo apt install iproute2".into());
     }
 
-    if bin_exists("conntrack") {
-        match run_cmd_capture("conntrack", &["-L"], Duration::from_secs(5)) {
-            Ok(o) if is_permission_output(&o) => {
-                notes.push(
-                    "conntrack está pero pide CAP_NET_ADMIN: las conexiones salen de ss; NAT va en su pestaña."
-                        .into(),
-                );
-            }
-            Ok(o) if !o.stdout.trim().is_empty() => {
-                sources.push("conntrack -L".into());
-                notes.push(
-                    "conntrack disponible: las traducciones NAT están en la pestaña NAT.".into(),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // Enriquecer con PTR (pocos, para no clavar el refresh).
-    let mut budget = 6u32;
-    for row in rows.iter_mut() {
-        if let Some((dom, src)) = ptr.lookup_cached(&row.remote_ip) {
-            row.domain = Some(dom);
-            row.domain_source = Some(src);
-            continue;
-        }
-        if budget == 0 {
-            continue;
-        }
-        if parse_ip_opt(&row.remote_ip).is_some_and(is_public_ip) {
-            budget -= 1;
-            if let Some(name) = lookup_ptr(ptr, &row.remote_ip) {
-                row.domain = Some(name);
-                row.domain_source = Some("DNS inverso (PTR)".into());
-            }
-        }
-    }
+    // NAT/conntrack vive en su pestaña. Acá solo ss + nombres ya cacheados.
+    ptr.decorate_rows(&mut rows);
+    ptr.mark_non_public(&rows);
 
     ConnectionsReport {
         collected_at_ms: now_ms(),
@@ -423,51 +496,7 @@ pub fn collect_firewall() -> FirewallReport {
 }
 
 pub fn collect_listeners(session: &mut ListenerSession) -> ListenersReport {
-    let mut missing = Vec::new();
-    let mut notes = Vec::new();
-    let mut rows = Vec::new();
-    let mut source = None;
-
-    if bin_exists("ss") {
-        let text = match run_cmd_capture("ss", &["-H", "-tulpn"], Duration::from_secs(5)) {
-            Ok(o) if o.stdout.trim().is_empty() => {
-                run_cmd_capture("ss", &["-tulpn"], Duration::from_secs(5))
-                    .map(|x| x.stdout)
-                    .unwrap_or_default()
-            }
-            Ok(o) => o.stdout,
-            Err(CoreError::BinaryMissing(b)) => {
-                missing.push(b);
-                String::new()
-            }
-            Err(e) => {
-                notes.push(e.to_string());
-                String::new()
-            }
-        };
-        if !text.is_empty() {
-            rows = parse_ss_listeners(&text);
-            source = Some("ss -tulpn".into());
-        }
-    } else {
-        missing.push("ss".into());
-        notes.push("Falta `ss` (iproute2).".into());
-    }
-
-    let (rows, extra_notes) = apply_listener_session(session, rows);
-    notes.extend(extra_notes);
-    let alerts: Vec<ListenerRow> = session.alerts.values().cloned().collect();
-    let new_count = alerts.len() as u64;
-
-    ListenersReport {
-        collected_at_ms: now_ms(),
-        rows,
-        alerts,
-        new_count,
-        source,
-        missing,
-        notes,
-    }
+    session.finish_report(ListenerSession::collect_rows())
 }
 
 pub fn listener_keys(rows: &[ListenerRow]) -> HashSet<String> {
@@ -1090,5 +1119,87 @@ mod tests {
         };
         remember_dns_talker(&mut acc, &closed);
         assert_eq!(acc.len(), 1, "sin socket DNS no se borra el historial");
+    }
+
+    fn conn(remote_ip: &str) -> ConnectionRow {
+        ConnectionRow {
+            protocol: "tcp".into(),
+            local_ip: "192.168.0.24".into(),
+            local_port: "40000".into(),
+            remote_ip: remote_ip.into(),
+            remote_port: "443".into(),
+            state: "ESTABLISHED".into(),
+            process: Some("firefox".into()),
+            pid: Some(1),
+            domain: None,
+            domain_source: None,
+        }
+    }
+
+    #[test]
+    fn ptr_cache_decorates_without_dns_and_lists_pending() {
+        let mut cache = PtrCache::default();
+        cache.remember("1.1.1.1".into(), Some("one.one.one.one".into()));
+        let mut rows = vec![
+            conn("1.1.1.1"),
+            conn("192.168.0.1"),
+            conn("8.8.8.8"),
+            conn("8.8.8.8"),
+        ];
+        cache.decorate_rows(&mut rows);
+        cache.mark_non_public(&rows);
+        assert_eq!(rows[0].domain.as_deref(), Some("one.one.one.one"));
+        assert_eq!(rows[0].domain_source.as_deref(), Some("DNS inverso (PTR)"));
+        assert!(rows[1].domain.is_none());
+        assert!(rows[2].domain.is_none());
+        let pending = cache.pending_public_ips(&rows, 6);
+        assert_eq!(pending, vec!["8.8.8.8".to_string()]);
+        assert!(PtrCache::lookup_addr("192.168.0.1").is_none());
+        assert!(lookup_ptr(&cache, "9.9.9.9").is_none());
+        assert!(!cache.map.contains_key("9.9.9.9"));
+    }
+
+    #[test]
+    fn ptr_absorb_keeps_existing_hits() {
+        let mut live = PtrCache::default();
+        live.remember("1.1.1.1".into(), Some("kept".into()));
+        let mut other = PtrCache::default();
+        other.remember("1.1.1.1".into(), Some("stale".into()));
+        other.remember("8.8.8.8".into(), Some("dns.google".into()));
+        live.absorb(other);
+        assert_eq!(
+            live.lookup_cached("1.1.1.1").map(|(n, _)| n).as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            live.lookup_cached("8.8.8.8").map(|(n, _)| n).as_deref(),
+            Some("dns.google")
+        );
+    }
+
+    #[test]
+    fn collect_connections_skips_conntrack() {
+        let mut ptr = PtrCache::default();
+        let report = collect_connections(&mut ptr);
+        assert!(report.sources.iter().all(|s| !s.contains("conntrack")));
+        assert!(report
+            .notes
+            .iter()
+            .all(|n| !n.to_ascii_lowercase().contains("conntrack")));
+    }
+
+    #[test]
+    fn finish_report_applies_session_without_ss() {
+        let mut session = ListenerSession::default();
+        let scan = ListenerScan {
+            rows: vec![row("tcp", "0.0.0.0", "22", "sshd")],
+            source: Some("fixture".into()),
+            missing: vec![],
+            notes: vec![],
+        };
+        let report = session.finish_report(scan);
+        assert_eq!(report.source.as_deref(), Some("fixture"));
+        assert!(!report.rows[0].is_new);
+        assert!(report.notes.iter().any(|n| n.contains("Foto inicial")));
     }
 }

@@ -4,17 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 use wifi_core::net::{
-    collect_boot_traffic, collect_connections, collect_firewall, collect_listeners, collect_nat,
-    default_gateway, geo_opt_in_denied_message, lookup_ip_external, monitor_rows,
-    spawn_dns_monitor, start_trace, BootTrafficReport, ConnectionsReport, DnsMonitorStatus,
-    DnsProgramRow, FirewallReport, GeoCache, GeoInfo, ListenerSession, ListenersReport, NatReport,
-    PtrCache,
+    collect_boot_traffic, collect_connections, collect_firewall, collect_nat, default_gateway,
+    geo_opt_in_denied_message, lookup_ip_external, monitor_rows, spawn_dns_monitor, start_trace,
+    BootTrafficReport, ConnectionsReport, DnsMonitorStatus, DnsProgramRow, FirewallReport,
+    GeoCache, GeoInfo, ListenerSession, ListenersReport, NatReport, PtrCache,
 };
 use wifi_core::{validate_host, AppCore, HistoryPoint, HistoryRange, Snapshot};
 
 struct AppState {
     core: Mutex<AppCore>,
-    ptr: Mutex<PtrCache>,
+    ptr: Arc<Mutex<PtrCache>>,
     geo: Mutex<GeoCache>,
     listeners: Mutex<ListenerSession>,
     trace_cancel: Mutex<Option<Arc<AtomicBool>>>,
@@ -25,6 +24,45 @@ struct AppState {
 
 fn map_err(err: wifi_core::CoreError) -> String {
     err.to_string()
+}
+
+/// I/O de red fuera del hilo principal, con locks cortos. Misma forma que `sweep_lan`.
+struct AsyncNet;
+
+impl AsyncNet {
+    async fn blocking<T: Send + 'static>(
+        work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        tauri::async_runtime::spawn_blocking(work)
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    fn resolve_ptrs_later(ptr: Arc<Mutex<PtrCache>>, ips: Vec<String>) {
+        if ips.is_empty() {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            let resolved = match tauri::async_runtime::spawn_blocking(move || {
+                ips.into_iter()
+                    .map(|ip| {
+                        let name = PtrCache::lookup_addr(&ip);
+                        (ip, name)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if let Ok(mut cache) = ptr.lock() {
+                for (ip, name) in resolved {
+                    cache.remember(ip, name);
+                }
+            }
+        });
+    }
 }
 
 #[tauri::command]
@@ -68,10 +106,26 @@ fn get_history(
     core.history(&target, range).map_err(map_err)
 }
 
-#[tauri::command(async)]
-fn get_connections(state: tauri::State<AppState>) -> Result<ConnectionsReport, String> {
-    let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
-    Ok(collect_connections(&mut ptr))
+#[tauri::command]
+async fn get_connections(state: tauri::State<'_, AppState>) -> Result<ConnectionsReport, String> {
+    let cache = {
+        let ptr = state.ptr.lock().map_err(|e| e.to_string())?;
+        ptr.clone()
+    };
+    let ptr_slot = state.ptr.clone();
+    let (report, pending, updated) = AsyncNet::blocking(move || {
+        let mut cache = cache;
+        let report = collect_connections(&mut cache);
+        let pending = cache.pending_public_ips(&report.rows, 6);
+        Ok((report, pending, cache))
+    })
+    .await?;
+    {
+        let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
+        ptr.absorb(updated);
+    }
+    AsyncNet::resolve_ptrs_later(ptr_slot, pending);
+    Ok(report)
 }
 
 #[tauri::command(async)]
@@ -84,8 +138,8 @@ fn get_firewall() -> Result<FirewallReport, String> {
     Ok(collect_firewall())
 }
 
-#[tauri::command(async)]
-fn get_boot_traffic(state: tauri::State<AppState>) -> Result<BootTrafficReport, String> {
+#[tauri::command]
+async fn get_boot_traffic(state: tauri::State<'_, AppState>) -> Result<BootTrafficReport, String> {
     let monitor = {
         let map = state.dns_monitor.lock().map_err(|e| e.to_string())?;
         monitor_rows(&map)
@@ -94,22 +148,46 @@ fn get_boot_traffic(state: tauri::State<AppState>) -> Result<BootTrafficReport, 
         let s = state.dns_monitor_status.lock().map_err(|e| e.to_string())?;
         s.clone()
     };
-    let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
-    let conns = collect_connections(&mut ptr);
-    let mut programs = state.dns_programs.lock().map_err(|e| e.to_string())?;
-    Ok(collect_boot_traffic(
-        &mut ptr,
-        &monitor,
-        &monitor_status,
-        &mut programs,
-        &conns.rows,
-    ))
+    let cache = {
+        let ptr = state.ptr.lock().map_err(|e| e.to_string())?;
+        ptr.clone()
+    };
+    let programs = {
+        let g = state.dns_programs.lock().map_err(|e| e.to_string())?;
+        g.clone()
+    };
+    let (report, updated_ptr, updated_programs) = AsyncNet::blocking(move || {
+        let mut ptr = cache;
+        let mut programs = programs;
+        let conns = collect_connections(&mut ptr);
+        let report = collect_boot_traffic(
+            &mut ptr,
+            &monitor,
+            &monitor_status,
+            &mut programs,
+            &conns.rows,
+        );
+        Ok((report, ptr, programs))
+    })
+    .await?;
+    {
+        let mut ptr = state.ptr.lock().map_err(|e| e.to_string())?;
+        ptr.absorb(updated_ptr);
+    }
+    {
+        let mut g = state.dns_programs.lock().map_err(|e| e.to_string())?;
+        for (k, v) in updated_programs {
+            g.entry(k).or_insert(v);
+        }
+    }
+    Ok(report)
 }
 
-#[tauri::command(async)]
-fn get_listeners(state: tauri::State<AppState>) -> Result<ListenersReport, String> {
+#[tauri::command]
+async fn get_listeners(state: tauri::State<'_, AppState>) -> Result<ListenersReport, String> {
+    let scan = AsyncNet::blocking(|| Ok(ListenerSession::collect_rows())).await?;
     let mut session = state.listeners.lock().map_err(|e| e.to_string())?;
-    Ok(collect_listeners(&mut session))
+    Ok(session.finish_report(scan))
 }
 
 #[tauri::command]
@@ -206,7 +284,7 @@ pub fn run() {
             spawn_dns_monitor(dns_monitor.clone(), dns_monitor_status.clone(), dns_cancel);
             app.manage(AppState {
                 core: Mutex::new(core),
-                ptr: Mutex::new(PtrCache::default()),
+                ptr: Arc::new(Mutex::new(PtrCache::default())),
                 geo: Mutex::new(GeoCache::default()),
                 listeners: Mutex::new(ListenerSession::default()),
                 trace_cancel: Mutex::new(None),
