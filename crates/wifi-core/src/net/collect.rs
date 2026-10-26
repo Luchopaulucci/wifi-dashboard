@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -795,33 +796,49 @@ where
                 });
                 let mut hops: Vec<TraceHop> = Vec::new();
                 if let Some(out) = stdout {
-                    let reader = BufReader::new(out);
-                    for line in reader.lines() {
+                    // Hilo aparte: Cancelar no espera a que stdout imprima una línea.
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        for line in BufReader::new(out).lines() {
+                            if tx.send(line).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    loop {
                         if cancel.load(Ordering::Relaxed) {
-                            let _ = child.kill();
                             break;
                         }
-                        let Ok(line) = line else { break };
-                        if let Some(mut hop) = parse_trace_line(&line) {
-                            classify_hop_kinds(std::slice::from_mut(&mut hop), gateway, &dest);
-                            // Reclassify globally for ISP start
-                            hops.retain(|h| h.hop != hop.hop);
-                            hops.push(hop.clone());
-                            hops.sort_by_key(|h| h.hop);
-                            classify_hop_kinds(&mut hops, gateway, &dest);
-                            let emitted = hops
-                                .iter()
-                                .find(|h| h.hop == hop.hop)
-                                .cloned()
-                                .unwrap_or(hop);
-                            on_event(TraceEvent {
-                                session_id: session_id.clone(),
-                                kind: "hop".into(),
-                                hop: Some(emitted),
-                                message: None,
-                                tool: Some(bin.into()),
-                                privilege: None,
-                            });
+                        match rx.recv_timeout(Duration::from_millis(20)) {
+                            Ok(Ok(line)) => {
+                                if let Some(mut hop) = parse_trace_line(&line) {
+                                    classify_hop_kinds(
+                                        std::slice::from_mut(&mut hop),
+                                        gateway,
+                                        &dest,
+                                    );
+                                    hops.retain(|h| h.hop != hop.hop);
+                                    hops.push(hop.clone());
+                                    hops.sort_by_key(|h| h.hop);
+                                    classify_hop_kinds(&mut hops, gateway, &dest);
+                                    let emitted = hops
+                                        .iter()
+                                        .find(|h| h.hop == hop.hop)
+                                        .cloned()
+                                        .unwrap_or(hop);
+                                    on_event(TraceEvent {
+                                        session_id: session_id.clone(),
+                                        kind: "hop".into(),
+                                        hop: Some(emitted),
+                                        message: None,
+                                        tool: Some(bin.into()),
+                                        privilege: None,
+                                    });
+                                }
+                            }
+                            Ok(Err(_)) => break,
+                            Err(RecvTimeoutError::Timeout) => continue,
+                            Err(RecvTimeoutError::Disconnected) => break,
                         }
                     }
                 }
@@ -1469,6 +1486,79 @@ mod tests {
             "{normal}"
         );
         assert!(normal.contains("no hops"), "{normal}");
+    }
+
+    fn assert_cancel_silent_stdout(elevate: bool) {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        if elevate {
+            crate::command::test_runner::unhide_bin("traceroute");
+            crate::command::test_runner::set_bin("pkexec", "/usr/bin/pkexec");
+            crate::command::test_runner::set_bin("traceroute", "/usr/bin/traceroute");
+            crate::command::test_runner::set_spawn_script("pkexec", "exec sleep 8");
+        } else {
+            crate::command::test_runner::set_bin("tracepath", "/usr/bin/tracepath");
+            crate::command::test_runner::hide_bin("traceroute");
+            crate::command::test_runner::set_spawn_script("tracepath", "exec sleep 8");
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let start = Instant::now();
+        let flag = cancel.clone();
+        let sink = events.clone();
+        start_trace(
+            "1.1.1.1",
+            None,
+            cancel,
+            elevate,
+            if elevate {
+                "sid-silent-elev"
+            } else {
+                "sid-silent"
+            }
+            .into(),
+            move |ev| {
+                if ev.kind == "start" && ev.tool.is_some() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                sink.lock().unwrap().push(ev);
+            },
+        )
+        .expect("start_trace");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "cancel con stdout mudo esperó {elapsed:?} (elevate={elevate})"
+        );
+        let events = events.lock().unwrap().clone();
+        let cancelled = events
+            .iter()
+            .find(|e| e.kind == "cancelled")
+            .unwrap_or_else(|| {
+                panic!(
+                    "sin cancelled (elevate={elevate}): {:?}",
+                    events.iter().map(|e| &e.kind).collect::<Vec<_>>()
+                )
+            });
+        let msg = cancelled.message.as_deref().unwrap_or("");
+        assert!(
+            msg.starts_with("Ruta cancelada."),
+            "elevate={elevate} message={msg:?}"
+        );
+        if !elevate {
+            assert_eq!(cancelled.message.as_deref(), Some("Ruta cancelada."));
+            assert!(cancelled.privilege.is_none());
+        }
+    }
+
+    #[test]
+    fn cancel_silent_stdout_emits_cancelled_immediately() {
+        let _guard = crate::command::test_runner::install();
+        assert_cancel_silent_stdout(false);
+        assert_cancel_silent_stdout(true);
     }
 
     #[test]
